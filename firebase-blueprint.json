@@ -22,6 +22,11 @@
           "type": "string",
           "description": "Currently selected voice model profile document ID."
         },
+        "preferredVoiceGender": {
+          "type": "string",
+          "enum": ["FEMALE", "MALE"],
+          "description": "Preferred speaking voice gender for TTS and Live speech output."
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time",
@@ -132,7 +137,7 @@
         },
         "architecture": {
           "type": "string",
-          "enum": ["DEEP_PHONETIC", "ADAPTIVE_GENERAL", "ULTRA_FAST", "PRECISION_TRANSCRIBE"]
+          "enum": ["ADAPTIVE_FLASH", "ULTRA_FAST", "FLAGSHIP_ARGON", "DEEP_PHONETIC", "ADAPTIVE_GENERAL", "PRO_TRANSCRIBE", "LOCAL_ON_DEVICE"]
         },
         "geminiModelId": {
           "type": "string"

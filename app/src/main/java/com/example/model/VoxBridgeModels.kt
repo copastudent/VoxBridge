@@ -16,40 +16,98 @@ enum class SpeechLanguage(val code: String, val label: String, val nativeLabel: 
     }
 }
 
-enum class VoiceArchitecture(
+enum class ModelTier(val displayName: String, val shortLabel: String) {
+    FREE("Free Cloud Models", "Free"),
+    PAID("Paid Cloud Models (Blaze)", "Paid"),
+    LOCAL("Local On-Device (Offline)", "Local")
+}
+
+enum class SpeakingVoiceGender(
     val displayName: String,
-    val geminiModelId: String,
-    val latencyProfile: String,
+    val geminiVoiceName: String,
     val description: String
 ) {
-    DEEP_PHONETIC(
-        displayName = "Deep Phonetic Resonance",
-        geminiModelId = "gemini-4-carbon",
-        latencyProfile = "High Thinking",
-        description = "Uses deep reasoning to decode complex dysarthric or non-standard articulation patterns."
+    FEMALE(
+        displayName = "Female",
+        geminiVoiceName = "Kore",
+        description = "Kore • Clear & warm female voice"
     ),
-    ADAPTIVE_GENERAL(
-        displayName = "Balanced Adaptive Core",
-        geminiModelId = "gemini-4-hydrogen",
-        latencyProfile = "Balanced",
-        description = "Real-time streaming recognition tuned to your personalized phoneme map."
-    ),
-    ULTRA_FAST(
-        displayName = "Rapid Live Dictation",
-        geminiModelId = "gemini-3.1-flash-lite",
-        latencyProfile = "Ultra-Low Latency",
-        description = "Fastest turnaround for continuous real-time conversational typing."
-    ),
-    PRECISION_TRANSCRIBE(
-        displayName = "Acoustic Speech Transcriber",
-        geminiModelId = "gemini-3.5-transcribe",
-        latencyProfile = "Speech-Focused",
-        description = "Dedicated speech-to-text acoustic model conditioned on your speaker profile."
+    MALE(
+        displayName = "Male",
+        geminiVoiceName = "Orus",
+        description = "Orus • Clear & firm male voice"
     );
 
     companion object {
-        fun fromName(raw: String?): VoiceArchitecture =
-            entries.firstOrNull { it.name == raw } ?: ADAPTIVE_GENERAL
+        fun fromName(raw: String?): SpeakingVoiceGender =
+            entries.firstOrNull { it.name.equals(raw, ignoreCase = true) } ?: FEMALE
+    }
+}
+
+enum class VoiceArchitecture(
+    val displayName: String,
+    val geminiModelId: String,
+    val tier: ModelTier,
+    val latencyProfile: String,
+    val description: String
+) {
+    ADAPTIVE_FLASH(
+        displayName = "Gemini 3.8 Flash",
+        geminiModelId = "gemini-3.8-flash",
+        tier = ModelTier.FREE,
+        latencyProfile = "Free • Balanced",
+        description = "Frontier-class speech adaptation and real-time dictation. No billing required."
+    ),
+    ULTRA_FAST(
+        displayName = "Gemini 3.5 Flash-Lite",
+        geminiModelId = "gemini-3.5-flash-lite",
+        tier = ModelTier.FREE,
+        latencyProfile = "Free • Ultra-Fast",
+        description = "High-volume, ultra-low latency model for continuous dictation on the Free Tier."
+    ),
+    FLAGSHIP_ARGON(
+        displayName = "Gemini 4 Argon",
+        geminiModelId = "gemini-4-argon",
+        tier = ModelTier.PAID,
+        latencyProfile = "Paid • Flagship",
+        description = "Most powerful Gemini 4 reasoning model for complex dysarthric patterns. Requires Blaze billing."
+    ),
+    DEEP_PHONETIC(
+        displayName = "Gemini 4 Carbon",
+        geminiModelId = "gemini-4-carbon",
+        tier = ModelTier.PAID,
+        latencyProfile = "Paid • High Thinking",
+        description = "Deep phonetic reasoning with High Thinking calibration. Requires Blaze billing."
+    ),
+    ADAPTIVE_GENERAL(
+        displayName = "Gemini 4 Hydrogen",
+        geminiModelId = "gemini-4-hydrogen",
+        tier = ModelTier.PAID,
+        latencyProfile = "Paid • Streaming Pro",
+        description = "Balanced Gemini 4 streaming speech adaptation engine. Requires Blaze billing."
+    ),
+    PRO_TRANSCRIBE(
+        displayName = "Gemini 3.1 Pro",
+        geminiModelId = "gemini-3.1-pro-preview",
+        tier = ModelTier.PAID,
+        latencyProfile = "Paid • Precision Pro",
+        description = "Gemini 3.1 Pro precision speech decoding for subtle articulation cues. Requires Blaze billing."
+    ),
+    LOCAL_ON_DEVICE(
+        displayName = "Local Acoustic Model",
+        geminiModelId = "local-on-device-v1",
+        tier = ModelTier.LOCAL,
+        latencyProfile = "Local • Offline",
+        description = "100% on-device personalized acoustic DTW trainer + downloadable offline speech pack."
+    );
+
+    companion object {
+        fun fromName(raw: String?): VoiceArchitecture = when (raw) {
+            "PRECISION_TRANSCRIBE" -> PRO_TRANSCRIBE
+            else -> entries.firstOrNull { it.name == raw } ?: ADAPTIVE_FLASH
+        }
+
+        fun byTier(tier: ModelTier): List<VoiceArchitecture> = entries.filter { it.tier == tier }
     }
 }
 
@@ -87,6 +145,7 @@ data class UserProfile(
     val displayName: String = "",
     val preferredLanguage: String = SpeechLanguage.ENGLISH.code,
     val activeModelId: String = "",
+    val preferredVoiceGender: String = SpeakingVoiceGender.FEMALE.name,
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
 )

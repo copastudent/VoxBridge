@@ -3,11 +3,14 @@ package com.example.ai
 import android.content.Context
 import android.speech.tts.TextToSpeech
 import android.util.Log
+import com.example.model.ModelTier
+import com.example.model.SpeakingVoiceGender
 import com.example.model.SpeechLanguage
 import com.example.model.SpeechRecording
 import com.example.model.VoiceArchitecture
 import com.example.model.VoiceModelProfile
 import com.google.firebase.Firebase
+import com.google.firebase.ai.GenerativeModel
 import com.google.firebase.ai.LiveGenerativeModel
 import com.google.firebase.ai.ai
 import com.google.firebase.ai.type.AudioTranscriptionConfig
@@ -31,6 +34,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 
 data class TrainedModelResult(
     val summary: String,
@@ -51,6 +55,10 @@ class VoiceAiService(private val context: Context) {
     private var androidTts: TextToSpeech? = null
     private var androidTtsReady: Boolean = false
 
+    private val trainingModelsCache = ConcurrentHashMap<VoiceArchitecture, GenerativeModel>()
+    private val dictationModelsCache = ConcurrentHashMap<VoiceArchitecture, GenerativeModel>()
+    private val ttsModelsCache = ConcurrentHashMap<SpeakingVoiceGender, GenerativeModel>()
+
     private val trainingSchema = Schema.obj(
         properties = mapOf(
             "summary" to Schema.string(description = "Concise human-readable summary of the speaker's vocal and phonetic profile"),
@@ -63,63 +71,70 @@ class VoiceAiService(private val context: Context) {
         )
     )
 
-    // Deep reasoning model for training voice profiles (ThinkingLevel.HIGH, no maxOutputTokens)
-    private val trainingModel by lazy {
-        Firebase.ai.generativeModel(
-            modelName = "gemini-4-carbon",
-            generationConfig = generationConfig {
-                responseMimeType = "application/json"
-                responseSchema = trainingSchema
-                thinkingConfig = thinkingConfig {
-                    thinkingLevel = ThinkingLevel.HIGH
+    private fun getTrainingModel(architecture: VoiceArchitecture): GenerativeModel {
+        val cloudArch = if (architecture.tier == ModelTier.LOCAL) {
+            VoiceArchitecture.ADAPTIVE_FLASH
+        } else {
+            architecture
+        }
+        return trainingModelsCache.getOrPut(cloudArch) {
+            Firebase.ai.generativeModel(
+                modelName = cloudArch.geminiModelId,
+                generationConfig = generationConfig {
+                    responseMimeType = "application/json"
+                    responseSchema = trainingSchema
+                    if (cloudArch == VoiceArchitecture.DEEP_PHONETIC ||
+                        cloudArch == VoiceArchitecture.FLAGSHIP_ARGON
+                    ) {
+                        thinkingConfig = thinkingConfig {
+                            thinkingLevel = ThinkingLevel.HIGH
+                        }
+                    }
                 }
-            }
-        )
+            )
+        }
     }
 
-    // Dictation models across the 4 selectable voice architectures
-    private val deepPhoneticModel by lazy {
-        Firebase.ai.generativeModel(
-            modelName = "gemini-4-carbon",
-            generationConfig = generationConfig {
-                thinkingConfig = thinkingConfig {
-                    thinkingLevel = ThinkingLevel.HIGH
+    private fun getDictationModel(architecture: VoiceArchitecture): GenerativeModel {
+        val cloudArch = if (architecture.tier == ModelTier.LOCAL) {
+            VoiceArchitecture.ADAPTIVE_FLASH
+        } else {
+            architecture
+        }
+        return dictationModelsCache.getOrPut(cloudArch) {
+            if (cloudArch == VoiceArchitecture.DEEP_PHONETIC ||
+                cloudArch == VoiceArchitecture.FLAGSHIP_ARGON
+            ) {
+                Firebase.ai.generativeModel(
+                    modelName = cloudArch.geminiModelId,
+                    generationConfig = generationConfig {
+                        thinkingConfig = thinkingConfig {
+                            thinkingLevel = ThinkingLevel.HIGH
+                        }
+                    }
+                )
+            } else {
+                Firebase.ai.generativeModel(modelName = cloudArch.geminiModelId)
+            }
+        }
+    }
+
+    private fun getTtsModel(voiceGender: SpeakingVoiceGender): GenerativeModel {
+        return ttsModelsCache.getOrPut(voiceGender) {
+            Firebase.ai.generativeModel(
+                modelName = TTS_MODEL_ID,
+                generationConfig = generationConfig {
+                    responseModalities = listOf(ResponseModality.AUDIO)
+                    speechConfig = SpeechConfig(voice = Voice(voiceGender.geminiVoiceName))
                 }
-            }
-        )
-    }
-
-    private val adaptiveGeneralModel by lazy {
-        Firebase.ai.generativeModel(
-            modelName = "gemini-4-hydrogen"
-        )
-    }
-
-    private val ultraFastModel by lazy {
-        Firebase.ai.generativeModel(
-            modelName = "gemini-3.1-flash-lite"
-        )
-    }
-
-    private val precisionTranscribeModel by lazy {
-        Firebase.ai.generativeModel(
-            modelName = "gemini-3.5-transcribe"
-        )
-    }
-
-    private val ttsModel by lazy {
-        Firebase.ai.generativeModel(
-            modelName = "gemini-3.8-flash-tts",
-            generationConfig = generationConfig {
-                responseModalities = listOf(ResponseModality.AUDIO)
-                speechConfig = SpeechConfig(voice = Voice("Kore"))
-            }
-        )
+            )
+        }
     }
 
     private fun buildLiveModel(
         language: SpeechLanguage,
-        activeProfile: VoiceModelProfile?
+        activeProfile: VoiceModelProfile?,
+        voiceGender: SpeakingVoiceGender
     ): LiveGenerativeModel {
         val profileContext = if (activeProfile != null) {
             "Active Speaker Adaptation Profile (${activeProfile.name}): ${activeProfile.adaptationPrompt}"
@@ -134,10 +149,10 @@ class VoiceAiService(private val context: Context) {
             )
         }
         return Firebase.ai.liveModel(
-            modelName = "gemini-3.8-live",
+            modelName = LIVE_MODEL_ID,
             generationConfig = liveGenerationConfig {
                 responseModality = ResponseModality.AUDIO
-                speechConfig = SpeechConfig(voice = Voice("Kore"))
+                speechConfig = SpeechConfig(voice = Voice(voiceGender.geminiVoiceName))
                 inputAudioTranscription = AudioTranscriptionConfig()
                 outputAudioTranscription = AudioTranscriptionConfig()
             },
@@ -177,7 +192,7 @@ class VoiceAiService(private val context: Context) {
                     }
                 }
 
-                val response = trainingModel.generateContent(promptContent)
+                val response = getTrainingModel(architecture).generateContent(promptContent)
                 val jsonText = response.text ?: throw IllegalStateException("Training model returned empty response.")
                 val json = JSONObject(jsonText)
                 val summary = json.optString("summary", "Calibrated speaker profile for ${language.label}.")
@@ -211,12 +226,7 @@ class VoiceAiService(private val context: Context) {
         activeProfile: VoiceModelProfile?,
         wavBytes: ByteArray
     ): Flow<String> = flow {
-        val model = when (architecture) {
-            VoiceArchitecture.DEEP_PHONETIC -> deepPhoneticModel
-            VoiceArchitecture.ADAPTIVE_GENERAL -> adaptiveGeneralModel
-            VoiceArchitecture.ULTRA_FAST -> ultraFastModel
-            VoiceArchitecture.PRECISION_TRANSCRIBE -> precisionTranscribeModel
-        }
+        val model = getDictationModel(architecture)
 
         val adaptationContext = if (activeProfile != null) {
             "Trained Voice Model: ${activeProfile.name}\n" +
@@ -228,10 +238,11 @@ class VoiceAiService(private val context: Context) {
 
         val prompt = content {
             text(
-                "Transcribe the spoken audio accurately into clean ${language.label} text.\n" +
+                "Transcribe the spoken human speech in this audio accurately into clean ${language.label} text.\n" +
                     "$adaptationContext\n" +
-                    "Rules: Output ONLY the decoded words the speaker intended to say, without commentary, quotes, or timestamps. " +
-                    "If the audio is silence or unintelligible background noise, return an empty string."
+                    "STRICT RULES:\n" +
+                    "1. Output ONLY the exact words clearly spoken by the user, without commentary, quotes, or timestamps.\n" +
+                    "2. If there is only silence, ambient noise, static, breathing, clicks, or no clearly recognizable spoken words, output an EMPTY string (nothing at all). Never guess or invent words."
             )
             inlineData(wavBytes, "audio/wav")
         }
@@ -242,13 +253,20 @@ class VoiceAiService(private val context: Context) {
                 val text = chunk.text.orEmpty()
                 if (text.isNotEmpty()) {
                     accumulated.append(text)
-                    emit(accumulated.toString().trim())
+                    val cleaned = sanitizeTranscript(accumulated.toString())
+                    if (cleaned.isNotEmpty()) {
+                        emit(cleaned)
+                    }
                 }
             }
         }
     }
 
-    suspend fun synthesizeSpeech(text: String, language: SpeechLanguage): Result<SynthesizedAudio> {
+    suspend fun synthesizeSpeech(
+        text: String,
+        language: SpeechLanguage,
+        voiceGender: SpeakingVoiceGender
+    ): Result<SynthesizedAudio> {
         val cleanText = text.trim()
         if (cleanText.isEmpty()) return Result.failure(IllegalArgumentException("Nothing to speak."))
         return try {
@@ -257,7 +275,7 @@ class VoiceAiService(private val context: Context) {
                     val prompt = content {
                         text("Read aloud clearly and warmly in ${language.label}: $cleanText")
                     }
-                    val response = ttsModel.generateContent(prompt)
+                    val response = getTtsModel(voiceGender).generateContent(prompt)
                     val audioPart = response.candidates
                         .firstOrNull()
                         ?.content
@@ -297,28 +315,58 @@ class VoiceAiService(private val context: Context) {
         }
     }
 
-    fun speakWithSystemTtsFallback(text: String, language: SpeechLanguage) {
+    fun speakWithSystemTtsFallback(
+        text: String,
+        language: SpeechLanguage,
+        voiceGender: SpeakingVoiceGender
+    ) {
         val locale = if (language == SpeechLanguage.GUJARATI) Locale("gu", "IN") else Locale.US
         if (androidTts == null) {
             androidTts = TextToSpeech(context.applicationContext) { status ->
                 if (status == TextToSpeech.SUCCESS) {
                     androidTtsReady = true
-                    androidTts?.language = locale
+                    applySystemTtsVoice(locale, voiceGender)
                     androidTts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "voxbridge_tts")
                 }
             }
         } else if (androidTtsReady) {
-            androidTts?.language = locale
+            applySystemTtsVoice(locale, voiceGender)
             androidTts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "voxbridge_tts")
+        }
+    }
+
+    private fun applySystemTtsVoice(locale: Locale, voiceGender: SpeakingVoiceGender) {
+        val tts = androidTts ?: return
+        tts.language = locale
+        val langVoices = runCatching {
+            tts.voices?.filter { it.locale.language.equals(locale.language, ignoreCase = true) }.orEmpty()
+        }.getOrDefault(emptyList())
+
+        val preferredTokens = if (voiceGender == SpeakingVoiceGender.MALE) {
+            listOf("male", "-m-", "_m_", "gbd", "gba", "sfg", "ior", "wavenet-b", "wavenet-d", "network-m")
+        } else {
+            listOf("female", "-f-", "_f_", "gbb", "gbc", "wavenet-a", "wavenet-c", "wavenet-e", "network-f")
+        }
+        val matchedVoice = langVoices.firstOrNull { v ->
+            val lower = v.name.lowercase()
+            preferredTokens.any { lower.contains(it) }
+        }
+        if (matchedVoice != null) {
+            tts.voice = matchedVoice
+            tts.setPitch(1.0f)
+        } else {
+            // Adjust pitch clearly when only a single device voice exists for the locale
+            tts.setPitch(if (voiceGender == SpeakingVoiceGender.MALE) 0.82f else 1.12f)
         }
     }
 
     suspend fun connectLiveSession(
         language: SpeechLanguage,
-        activeProfile: VoiceModelProfile?
+        activeProfile: VoiceModelProfile?,
+        voiceGender: SpeakingVoiceGender
     ): LiveSession {
         return withTimeout(30_000L) {
-            buildLiveModel(language, activeProfile).connect()
+            buildLiveModel(language, activeProfile, voiceGender).connect()
         }
     }
 
@@ -334,5 +382,24 @@ class VoiceAiService(private val context: Context) {
 
     companion object {
         private const val TAG = "VoiceAiService"
+        private const val TTS_MODEL_ID = "gemini-3.1-flash-tts-preview"
+        private const val LIVE_MODEL_ID = "gemini-3.1-flash-live-preview"
+
+        internal fun sanitizeTranscript(raw: String): String {
+            val trimmed = raw.trim()
+            if (trimmed.isEmpty()) return ""
+            val lower = trimmed.lowercase()
+            if (SILENCE_MARKERS.any { lower == it || lower.contains("no speech") || lower.contains("background noise") }) {
+                return ""
+            }
+            if (trimmed.all { !it.isLetterOrDigit() }) return ""
+            return trimmed
+        }
+
+        private val SILENCE_MARKERS = setOf(
+            "[silence]", "(silence)", "silence", "[inaudible]", "(inaudible)",
+            "[noise]", "(noise)", "[background noise]", "(background noise)",
+            "[music]", "(music)", "[blank_audio]", "none", "null"
+        )
     }
 }

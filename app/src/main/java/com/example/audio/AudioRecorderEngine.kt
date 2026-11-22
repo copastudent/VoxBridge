@@ -6,6 +6,8 @@ import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.NoiseSuppressor
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -18,6 +20,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.sqrt
 
 data class RecordedAudioResult(
@@ -27,18 +31,147 @@ data class RecordedAudioResult(
     val peakAmplitude: Int
 )
 
+data class ProcessedAudioChunk(
+    val samples: ShortArray,
+    val hasSpeech: Boolean,
+    val activeSpeechMs: Int,
+    val speechRms: Float,
+    val updatedNoiseFloor: Float
+)
+
+/**
+ * Pure DSP audio cleaner & Voice Activity Detector (VAD):
+ * - Applies a DC/low-frequency rumble high-pass filter (~95Hz at 16kHz).
+ * - Maintains an adaptive ambient noise floor.
+ * - Attenuates non-speech frames (noise gate) and rejects silent/noise-only chunks.
+ */
+object SpeechAudioFilter {
+    private const val FRAME_SAMPLES = 320 // 20ms at 16kHz
+    private const val MIN_SPEECH_RMS = 0.022f
+    private const val MIN_ACTIVE_SPEECH_FRAMES = 6 // >= 120ms of speech energy
+    private const val NOISE_MULTIPLIER = 2.6f
+
+    fun processChunk(
+        rawSamples: ShortArray,
+        currentNoiseFloor: Float = 0.008f
+    ): ProcessedAudioChunk {
+        if (rawSamples.isEmpty()) {
+            return ProcessedAudioChunk(rawSamples, false, 0, 0f, currentNoiseFloor)
+        }
+
+        // 1. 1st-order high-pass filter to remove DC offset, wind, & 50/60Hz hum
+        val filtered = FloatArray(rawSamples.size)
+        val alpha = 0.96f
+        var prevX = rawSamples[0] / 32768f
+        var prevY = 0f
+        filtered[0] = 0f
+        for (i in 1 until rawSamples.size) {
+            val x = rawSamples[i] / 32768f
+            val y = alpha * (prevY + x - prevX)
+            filtered[i] = y
+            prevX = x
+            prevY = y
+        }
+
+        // 2. Compute per-20ms-frame RMS & ZCR to separate speech from stationary noise
+        val frameCount = filtered.size / FRAME_SAMPLES
+        if (frameCount == 0) {
+            return ProcessedAudioChunk(rawSamples, false, 0, 0f, currentNoiseFloor)
+        }
+
+        val frameRms = FloatArray(frameCount)
+        val frameZcr = FloatArray(frameCount)
+        for (f in 0 until frameCount) {
+            val start = f * FRAME_SAMPLES
+            var sumSq = 0.0
+            var crossings = 0
+            for (k in 0 until FRAME_SAMPLES) {
+                val s = filtered[start + k]
+                sumSq += s * s
+                if (k > 0 && ((filtered[start + k] >= 0f) != (filtered[start + k - 1] >= 0f))) {
+                    crossings++
+                }
+            }
+            frameRms[f] = sqrt(sumSq / FRAME_SAMPLES).toFloat()
+            frameZcr[f] = crossings.toFloat() / FRAME_SAMPLES
+        }
+
+        // Estimate ambient floor from the quietest 25% of frames
+        val sortedRms = frameRms.sorted()
+        val p25Index = (sortedRms.size / 4).coerceIn(0, sortedRms.lastIndex)
+        val chunkFloor = sortedRms[p25Index].coerceIn(0.002f, 0.06f)
+        val adaptedFloor = (currentNoiseFloor * 0.7f + chunkFloor * 0.3f).coerceIn(0.003f, 0.05f)
+        val speechThreshold = max(MIN_SPEECH_RMS, adaptedFloor * NOISE_MULTIPLIER)
+
+        // 3. Identify active speech frames (energy above threshold & speech-like ZCR)
+        val isSpeechFrame = BooleanArray(frameCount)
+        var activeFrames = 0
+        var activeRmsSum = 0f
+        for (f in 0 until frameCount) {
+            val rms = frameRms[f]
+            val zcr = frameZcr[f]
+            val speechLike = rms >= speechThreshold && zcr in 0.01f..0.48f
+            isSpeechFrame[f] = speechLike
+            if (speechLike) {
+                activeFrames++
+                activeRmsSum += rms
+            }
+        }
+
+        // Expand speech mask by 1 hangover frame on each side so word endings aren't clipped
+        val gateOpen = isSpeechFrame.copyOf()
+        for (f in 0 until frameCount) {
+            if (isSpeechFrame[f]) {
+                if (f > 0) gateOpen[f - 1] = true
+                if (f + 1 < frameCount) gateOpen[f + 1] = true
+            }
+        }
+
+        val hasSpeech = activeFrames >= MIN_ACTIVE_SPEECH_FRAMES
+        val meanSpeechRms = if (activeFrames > 0) activeRmsSum / activeFrames else 0f
+
+        // 4. Apply smooth noise attenuation to non-speech frames
+        val outSamples = ShortArray(rawSamples.size)
+        for (f in 0 until frameCount) {
+            val gain = if (gateOpen[f]) 1.0f else 0.08f
+            val start = f * FRAME_SAMPLES
+            for (k in 0 until FRAME_SAMPLES) {
+                val scaled = (filtered[start + k] * gain * 32767f).toInt().coerceIn(-32768, 32767)
+                outSamples[start + k] = scaled.toShort()
+            }
+        }
+        val tailStart = frameCount * FRAME_SAMPLES
+        for (i in tailStart until rawSamples.size) {
+            val scaled = (filtered[i] * 0.08f * 32767f).toInt().coerceIn(-32768, 32767)
+            outSamples[i] = scaled.toShort()
+        }
+
+        return ProcessedAudioChunk(
+            samples = outSamples,
+            hasSpeech = hasSpeech,
+            activeSpeechMs = activeFrames * 20,
+            speechRms = meanSpeechRms,
+            updatedNoiseFloor = adaptedFloor
+        )
+    }
+}
+
 /**
  * Real Android AudioRecord capture and AudioTrack playback engine.
- * Supports both full-phrase recording and streaming audio chunk emission for real-time dictation.
+ * Uses VOICE_RECOGNITION source + hardware NoiseSuppressor + adaptive VAD to suppress
+ * background noise and avoid hallucinated dictation during silence.
  */
 class AudioRecorderEngine {
 
     private var audioRecord: AudioRecord? = null
+    private var noiseSuppressor: NoiseSuppressor? = null
+    private var echoCanceler: AcousticEchoCanceler? = null
     private var captureJob: Job? = null
     private var playbackJob: Job? = null
 
     private val recordedBuffer = mutableListOf<Short>()
     private var recordingStartTimeMs: Long = 0L
+    private var adaptiveNoiseFloor: Float = 0.008f
 
     private val _isRecording = MutableStateFlow(false)
     val isRecording: StateFlow<Boolean> = _isRecording.asStateFlow()
@@ -55,8 +188,10 @@ class AudioRecorderEngine {
     @SuppressLint("MissingPermission")
     fun startRecording(
         scope: CoroutineScope,
-        chunkDurationMs: Long = 1600L,
+        chunkDurationMs: Long = 1800L,
+        filterSilence: Boolean = false,
         onChunkReady: ((ShortArray) -> Unit)? = null,
+        onSilenceFiltered: (() -> Unit)? = null,
         onError: (String) -> Unit = {}
     ) {
         if (_isRecording.value) return
@@ -71,33 +206,16 @@ class AudioRecorderEngine {
             return
         }
 
-        val bufferSize = maxOf(minBuf * 2, SAMPLE_RATE) // at least ~0.5s buffer
-        val recorder = try {
-            AudioRecord(
-                MediaRecorder.AudioSource.MIC,
-                SAMPLE_RATE,
-                AudioFormat.CHANNEL_IN_MONO,
-                AudioFormat.ENCODING_PCM_16BIT,
-                bufferSize
-            )
-        } catch (e: SecurityException) {
-            onError("Microphone permission is required to record speech.")
-            return
-        } catch (e: Exception) {
-            onError(e.localizedMessage ?: "Unable to access microphone.")
-            return
-        }
+        val bufferSize = maxOf(minBuf * 2, SAMPLE_RATE)
+        val recorder = createBestSpeechRecorder(bufferSize, onError) ?: return
 
-        if (recorder.state != AudioRecord.STATE_INITIALIZED) {
-            recorder.release()
-            onError("Microphone failed to initialize.")
-            return
-        }
+        attachAudioEffects(recorder.audioSessionId)
 
         synchronized(recordedBuffer) {
             recordedBuffer.clear()
         }
         audioRecord = recorder
+        adaptiveNoiseFloor = 0.008f
         recordingStartTimeMs = System.currentTimeMillis()
         _elapsedMs.value = 0L
         _amplitudeLevel.value = 0f
@@ -124,18 +242,29 @@ class AudioRecorderEngine {
                             }
                         }
                         val rms = sqrt(sumSquares / readCount).toFloat()
-                        _amplitudeLevel.value = (rms * 4.5f).coerceIn(0f, 1f)
+                        val displayLevel = ((rms - adaptiveNoiseFloor * 0.8f) * 4.5f).coerceIn(0f, 1f)
+                        _amplitudeLevel.value = displayLevel
                         _elapsedMs.value = System.currentTimeMillis() - recordingStartTimeMs
 
                         if (onChunkReady != null && chunkAccumulator.size >= chunkSamplesTarget) {
                             val chunkArray = chunkAccumulator.toShortArray()
                             chunkAccumulator.clear()
-                            onChunkReady(chunkArray)
+                            dispatchChunk(
+                                chunkArray = chunkArray,
+                                filterSilence = filterSilence,
+                                onChunkReady = onChunkReady,
+                                onSilenceFiltered = onSilenceFiltered
+                            )
                         }
                     }
                 }
                 if (onChunkReady != null && chunkAccumulator.size >= SAMPLE_RATE / 4) {
-                    onChunkReady(chunkAccumulator.toShortArray())
+                    dispatchChunk(
+                        chunkArray = chunkAccumulator.toShortArray(),
+                        filterSilence = filterSilence,
+                        onChunkReady = onChunkReady,
+                        onSilenceFiltered = onSilenceFiltered
+                    )
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Audio capture error", e)
@@ -143,6 +272,7 @@ class AudioRecorderEngine {
                     onError(e.localizedMessage ?: "Audio capture error.")
                 }
             } finally {
+                releaseAudioEffects()
                 try {
                     if (recorder.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
                         recorder.stop()
@@ -154,6 +284,82 @@ class AudioRecorderEngine {
         }
     }
 
+    private fun dispatchChunk(
+        chunkArray: ShortArray,
+        filterSilence: Boolean,
+        onChunkReady: (ShortArray) -> Unit,
+        onSilenceFiltered: (() -> Unit)?
+    ) {
+        val processed = SpeechAudioFilter.processChunk(chunkArray, adaptiveNoiseFloor)
+        adaptiveNoiseFloor = processed.updatedNoiseFloor
+        if (!filterSilence || processed.hasSpeech) {
+            onChunkReady(processed.samples)
+        } else {
+            onSilenceFiltered?.invoke()
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun createBestSpeechRecorder(bufferSize: Int, onError: (String) -> Unit): AudioRecord? {
+        val sources = listOf(MediaRecorder.AudioSource.VOICE_RECOGNITION, MediaRecorder.AudioSource.MIC)
+        for (source in sources) {
+            try {
+                val rec = AudioRecord(
+                    source,
+                    SAMPLE_RATE,
+                    AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT,
+                    bufferSize
+                )
+                if (rec.state == AudioRecord.STATE_INITIALIZED) {
+                    return rec
+                }
+                rec.release()
+            } catch (e: SecurityException) {
+                onError("Microphone permission is required to record speech.")
+                return null
+            } catch (e: Exception) {
+                Log.w(TAG, "AudioSource $source unavailable", e)
+            }
+        }
+        onError("Microphone failed to initialize.")
+        return null
+    }
+
+    private fun attachAudioEffects(audioSessionId: Int) {
+        try {
+            if (NoiseSuppressor.isAvailable()) {
+                noiseSuppressor = NoiseSuppressor.create(audioSessionId)?.apply {
+                    enabled = true
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "NoiseSuppressor unavailable", e)
+        }
+        try {
+            if (AcousticEchoCanceler.isAvailable()) {
+                echoCanceler = AcousticEchoCanceler.create(audioSessionId)?.apply {
+                    enabled = true
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "AcousticEchoCanceler unavailable", e)
+        }
+    }
+
+    private fun releaseAudioEffects() {
+        try {
+            noiseSuppressor?.release()
+        } catch (_: Exception) {
+        }
+        noiseSuppressor = null
+        try {
+            echoCanceler?.release()
+        } catch (_: Exception) {
+        }
+        echoCanceler = null
+    }
+
     fun stopRecording(): RecordedAudioResult {
         _isRecording.value = false
         _amplitudeLevel.value = 0f
@@ -161,19 +367,24 @@ class AudioRecorderEngine {
         captureJob = null
         audioRecord = null
 
-        val samples: ShortArray
+        val rawSamples: ShortArray
         synchronized(recordedBuffer) {
-            samples = recordedBuffer.toShortArray()
+            rawSamples = recordedBuffer.toShortArray()
             recordedBuffer.clear()
         }
+        val cleaned = if (rawSamples.size >= SAMPLE_RATE / 4) {
+            SpeechAudioFilter.processChunk(rawSamples, adaptiveNoiseFloor).samples
+        } else {
+            rawSamples
+        }
         var peak = 0
-        for (s in samples) {
+        for (s in cleaned) {
             val a = abs(s.toInt())
             if (a > peak) peak = a
         }
-        val durationMs = ((samples.size.toLong() * 1000L) / SAMPLE_RATE).coerceAtLeast(_elapsedMs.value)
+        val durationMs = ((cleaned.size.toLong() * 1000L) / SAMPLE_RATE).coerceAtLeast(_elapsedMs.value)
         return RecordedAudioResult(
-            samples = samples,
+            samples = cleaned,
             durationMs = durationMs,
             sampleRateHz = SAMPLE_RATE,
             peakAmplitude = peak
@@ -221,7 +432,7 @@ class AudioRecorderEngine {
                 var offset = 0
                 val chunkSize = 4096
                 while (isActive && offset < pcmBytes.size) {
-                    val toWrite = minOf(chunkSize, pcmBytes.size - offset)
+                    val toWrite = min(chunkSize, pcmBytes.size - offset)
                     track.write(pcmBytes, offset, toWrite)
                     offset += toWrite
                 }
@@ -278,7 +489,7 @@ class AudioRecorderEngine {
                 var offset = 0
                 val chunkSize = 4096
                 while (isActive && offset < pcmBytes.size) {
-                    val toWrite = minOf(chunkSize, pcmBytes.size - offset)
+                    val toWrite = min(chunkSize, pcmBytes.size - offset)
                     track.write(pcmBytes, offset, toWrite)
                     offset += toWrite
                 }
@@ -309,6 +520,7 @@ class AudioRecorderEngine {
             stopRecording()
         }
         stopPlayback()
+        releaseAudioEffects()
     }
 
     companion object {

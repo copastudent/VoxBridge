@@ -9,9 +9,15 @@ import com.example.audio.AudioStorageManager
 import com.example.audio.StorageStats
 import com.example.data.PhraseAssetRepository
 import com.example.data.VoxBridgeRepository
+import com.example.local.LocalPackStatus
+import com.example.local.LocalSpeechModelManager
+import com.example.local.LocalTrainedWeights
+import com.example.local.OfflineAsrPackState
 import com.example.model.CustomPhrase
 import com.example.model.DictationEntry
+import com.example.model.ModelTier
 import com.example.model.PhraseItem
+import com.example.model.SpeakingVoiceGender
 import com.example.model.SpeechLanguage
 import com.example.model.SpeechRecording
 import com.example.model.UiState
@@ -43,7 +49,7 @@ data class DictationUiState(
     val liveText: String = "",
     val partialChunkText: String = "",
     val lastLatencyMs: Long = 0L,
-    val selectedArchitecture: VoiceArchitecture = VoiceArchitecture.ADAPTIVE_GENERAL,
+    val selectedArchitecture: VoiceArchitecture = VoiceArchitecture.ADAPTIVE_FLASH,
     val errorMessage: String? = null,
     val statusNote: String? = null
 )
@@ -69,12 +75,16 @@ class VoxBridgeViewModel(
     private val storageManager: AudioStorageManager,
     val audioEngine: AudioRecorderEngine,
     private val aiService: VoiceAiService,
+    private val localSpeechManager: LocalSpeechModelManager,
     private val currentUserId: String,
     private val initialDisplayName: String
 ) : ViewModel() {
 
     private val _selectedLanguage = MutableStateFlow(SpeechLanguage.ENGLISH)
     val selectedLanguage: StateFlow<SpeechLanguage> = _selectedLanguage.asStateFlow()
+
+    private val _selectedVoiceGender = MutableStateFlow(SpeakingVoiceGender.FEMALE)
+    val selectedVoiceGender: StateFlow<SpeakingVoiceGender> = _selectedVoiceGender.asStateFlow()
 
     private val _currentPhraseIndex = MutableStateFlow(0)
     val currentPhraseIndex: StateFlow<Int> = _currentPhraseIndex.asStateFlow()
@@ -97,9 +107,16 @@ class VoxBridgeViewModel(
     private val _liveState = MutableStateFlow(LiveConversationState())
     val liveState: StateFlow<LiveConversationState> = _liveState.asStateFlow()
 
+    private val _localPackStatuses = MutableStateFlow<Map<SpeechLanguage, LocalPackStatus>>(emptyMap())
+    val localPackStatuses: StateFlow<Map<SpeechLanguage, LocalPackStatus>> = _localPackStatuses.asStateFlow()
+
+    private val _localAmplitude = MutableStateFlow(0f)
+    val localAmplitude: StateFlow<Float> = _localAmplitude.asStateFlow()
+
     private var activeLiveSession: LiveSession? = null
     private var liveSessionJob: Job? = null
     private var dictationStreamJob: Job? = null
+    private var usingSystemOfflineRecognizer: Boolean = false
 
     val userProfileState: StateFlow<UiState<UserProfile?>> =
         repository.observeUserProfile(currentUserId)
@@ -108,6 +125,10 @@ class VoxBridgeViewModel(
                     val prefLang = SpeechLanguage.fromCode(profile.preferredLanguage)
                     if (_selectedLanguage.value != prefLang) {
                         _selectedLanguage.value = prefLang
+                    }
+                    val prefGender = SpeakingVoiceGender.fromName(profile.preferredVoiceGender)
+                    if (_selectedVoiceGender.value != prefGender) {
+                        _selectedVoiceGender.value = prefGender
                     }
                 }
                 UiState.Success(profile)
@@ -187,6 +208,57 @@ class VoxBridgeViewModel(
         viewModelScope.launch {
             repository.ensureUserProfile(initialDisplayName)
             refreshStorageStats()
+            refreshLocalPackStatuses()
+        }
+    }
+
+    fun refreshLocalPackStatuses() {
+        viewModelScope.launch {
+            val map = SpeechLanguage.entries.associateWith { lang ->
+                localSpeechManager.inspectPackStatus(lang)
+            }
+            _localPackStatuses.value = map
+        }
+    }
+
+    fun downloadLocalModelPack(language: SpeechLanguage) {
+        viewModelScope.launch {
+            val existing = _localPackStatuses.value[language] ?: LocalPackStatus(language)
+            _localPackStatuses.value = _localPackStatuses.value + (
+                language to existing.copy(
+                    offlineAsrState = OfflineAsrPackState.DOWNLOADING,
+                    downloadProgressPct = 10,
+                    statusDetail = "Preparing ${language.label} local voice pack..."
+                )
+            )
+            val result = localSpeechManager.downloadLocalModelPack(language) { pct, msg ->
+                val current = _localPackStatuses.value[language] ?: LocalPackStatus(language)
+                _localPackStatuses.value = _localPackStatuses.value + (
+                    language to current.copy(
+                        offlineAsrState = OfflineAsrPackState.DOWNLOADING,
+                        downloadProgressPct = pct,
+                        statusDetail = msg
+                    )
+                )
+            }
+            result.onSuccess { updated ->
+                _localPackStatuses.value = _localPackStatuses.value + (language to updated)
+                _trainingState.value = TrainingUiState(
+                    trainingMessage = "Local ${language.label} speech pack downloaded. You can now train a Local Acoustic Model offline."
+                )
+            }.onFailure { err ->
+                refreshLocalPackStatuses()
+                _trainingState.value = TrainingUiState(
+                    errorMessage = err.localizedMessage ?: "Failed to download local voice pack."
+                )
+            }
+        }
+    }
+
+    fun deleteLocalModelPack(language: SpeechLanguage) {
+        viewModelScope.launch(Dispatchers.IO) {
+            localSpeechManager.deleteDownloadedPack(language)
+            refreshLocalPackStatuses()
         }
     }
 
@@ -195,6 +267,16 @@ class VoxBridgeViewModel(
         _currentPhraseIndex.value = 0
         viewModelScope.launch {
             repository.updateUserPreferences(preferredLanguage = language)
+        }
+    }
+
+    fun setVoiceGender(gender: SpeakingVoiceGender) {
+        _selectedVoiceGender.value = gender
+        _dictationState.value = _dictationState.value.copy(
+            statusNote = "Speaking voice set to ${gender.displayName} (${gender.geminiVoiceName})."
+        )
+        viewModelScope.launch {
+            repository.updateUserPreferences(preferredVoiceGender = gender)
         }
     }
 
@@ -221,6 +303,7 @@ class VoxBridgeViewModel(
         audioEngine.startRecording(
             scope = viewModelScope,
             chunkDurationMs = 5000L,
+            filterSilence = false,
             onChunkReady = null,
             onError = { msg ->
                 _recordingPhraseKey.value = null
@@ -262,7 +345,7 @@ class VoxBridgeViewModel(
                 )
                 refreshStorageStats()
                 if (saveRes.isSuccess) {
-                    _recordFeedback.value = "Saved ${result.durationMs}ms recording to controlled storage."
+                    _recordFeedback.value = "Saved ${result.durationMs}ms noise-filtered recording."
                 } else {
                     storageManager.deleteRecordingFile(wavFile.absolutePath)
                     _recordFeedback.value = saveRes.exceptionOrNull()?.localizedMessage ?: "Failed to sync recording."
@@ -328,14 +411,20 @@ class VoxBridgeViewModel(
             return
         }
 
+        val finalName = modelName.ifBlank { "${architecture.displayName} (${language.label})" }
         viewModelScope.launch {
             _trainingState.value = TrainingUiState(
                 isTraining = true,
-                trainingMessage = "Analyzing ${chosenRecordings.size} voice samples with Gemini High Thinking..."
+                trainingMessage = if (architecture.tier == ModelTier.LOCAL) {
+                    "Extracting on-device spectral & DTW templates from ${chosenRecordings.size} samples..."
+                } else {
+                    "Training with ${architecture.displayName} on your voice samples..."
+                }
             )
             try {
+                val maxToRead = if (architecture.tier == ModelTier.LOCAL) 60 else 5
                 val samplePairs = withContext(Dispatchers.IO) {
-                    chosenRecordings.take(5).mapNotNull { rec ->
+                    chosenRecordings.take(maxToRead).mapNotNull { rec ->
                         val bytes = storageManager.readAudioBytes(rec.localFilePath)
                         if (bytes != null) rec to bytes else null
                     }
@@ -347,16 +436,26 @@ class VoxBridgeViewModel(
                     return@launch
                 }
 
-                val trained = aiService.trainVoiceModel(
-                    architecture = architecture,
-                    language = language,
-                    modelName = modelName.ifBlank { "${architecture.displayName} (${language.label})" },
-                    samples = samplePairs,
-                    totalRecordingCount = chosenRecordings.size
-                )
+                val trained = if (architecture.tier == ModelTier.LOCAL) {
+                    val (result, _) = localSpeechManager.trainLocalPersonalizedModel(
+                        userId = currentUserId,
+                        modelName = finalName,
+                        language = language,
+                        samples = samplePairs
+                    )
+                    result
+                } else {
+                    aiService.trainVoiceModel(
+                        architecture = architecture,
+                        language = language,
+                        modelName = finalName,
+                        samples = samplePairs,
+                        totalRecordingCount = chosenRecordings.size
+                    )
+                }
 
                 val createRes = repository.createVoiceModel(
-                    name = modelName.ifBlank { "${architecture.displayName} (${language.label})" },
+                    name = finalName,
                     architecture = architecture,
                     language = language,
                     trainingSampleCount = chosenRecordings.size.toLong(),
@@ -376,7 +475,7 @@ class VoxBridgeViewModel(
                     )
                     _trainingState.value = TrainingUiState(
                         isTraining = false,
-                        trainingMessage = "Trained \"${modelName.ifBlank { architecture.displayName }}\" (${trained.confidenceScore}% confidence)."
+                        trainingMessage = "Trained \"$finalName\" with ${architecture.displayName} (${trained.confidenceScore}% fit)."
                     )
                 } else {
                     _trainingState.value = TrainingUiState(
@@ -390,7 +489,9 @@ class VoxBridgeViewModel(
                 throw e
             } catch (e: Exception) {
                 Log.e(TAG, "Model training failed", e)
-                _trainingState.value = TrainingUiState(errorMessage = e.localizedMessage ?: "Voice model training failed.")
+                _trainingState.value = TrainingUiState(
+                    errorMessage = formatFriendlyAiError(e, architecture)
+                )
             }
         }
     }
@@ -403,7 +504,8 @@ class VoxBridgeViewModel(
         val arch = VoiceArchitecture.fromName(profile.architecture)
         _dictationState.value = _dictationState.value.copy(
             selectedArchitecture = arch,
-            statusNote = "Active model: ${profile.name}"
+            errorMessage = null,
+            statusNote = "Active model: ${profile.name} (${arch.displayName})"
         )
         viewModelScope.launch {
             repository.updateUserPreferences(activeModelId = profile.id)
@@ -413,7 +515,8 @@ class VoxBridgeViewModel(
     fun selectArchitecturePreset(architecture: VoiceArchitecture) {
         _dictationState.value = _dictationState.value.copy(
             selectedArchitecture = architecture,
-            statusNote = "Switched engine to ${architecture.displayName}"
+            errorMessage = null,
+            statusNote = "Switched engine to ${architecture.displayName} (${architecture.tier.shortLabel})"
         )
     }
 
@@ -438,22 +541,38 @@ class VoxBridgeViewModel(
     fun startRealtimeDictation() {
         if (_dictationState.value.isLiveDictating) return
         val activeProfile = getActiveVoiceProfile()
-        val architecture = activeProfile?.let { VoiceArchitecture.fromName(it.architecture) }
-            ?: _dictationState.value.selectedArchitecture
+        val selectedArch = _dictationState.value.selectedArchitecture
+        val architecture = if (activeProfile != null && activeProfile.architecture == selectedArch.name) {
+            VoiceArchitecture.fromName(activeProfile.architecture)
+        } else {
+            selectedArch
+        }
         val language = _selectedLanguage.value
 
+        if (architecture.tier == ModelTier.LOCAL) {
+            startLocalOfflineDictation(language, activeProfile)
+            return
+        }
+
+        usingSystemOfflineRecognizer = false
         _dictationState.value = _dictationState.value.copy(
             isLiveDictating = true,
             errorMessage = null,
-            statusNote = "Listening with ${activeProfile?.name ?: architecture.displayName}..."
+            statusNote = "Listening with ${architecture.displayName} • Silence & background noise filtered"
         )
 
         audioEngine.startRecording(
             scope = viewModelScope,
             chunkDurationMs = 1800L,
+            filterSilence = true,
             onChunkReady = { pcmChunk ->
                 val wavBytes = AudioStorageManager.encodePcmToWav(pcmChunk, AudioRecorderEngine.SAMPLE_RATE)
-                processDictationChunk(architecture, language, activeProfile, wavBytes)
+                processCloudDictationChunk(architecture, language, activeProfile, wavBytes)
+            },
+            onSilenceFiltered = {
+                _dictationState.value = _dictationState.value.copy(
+                    statusNote = "Listening • Background noise / silence gated"
+                )
             },
             onError = { msg ->
                 _dictationState.value = _dictationState.value.copy(
@@ -464,7 +583,119 @@ class VoxBridgeViewModel(
         )
     }
 
-    private fun processDictationChunk(
+    private fun startLocalOfflineDictation(
+        language: SpeechLanguage,
+        activeProfile: VoiceModelProfile?
+    ) {
+        val packStatus = _localPackStatuses.value[language]
+        val localWeights = localSpeechManager.loadLatestLocalWeights(currentUserId, language)
+        val trainedLexicon = buildList {
+            localWeights?.templates?.forEach { add(it.phraseText) }
+            mergedPhrases.value.forEach { add(it.text) }
+        }.distinct()
+
+        // Prefer Android's downloaded on-device SpeechRecognizer when installed; otherwise use our DTW acoustic engine
+        if (packStatus?.offlineAsrState == OfflineAsrPackState.INSTALLED) {
+            usingSystemOfflineRecognizer = true
+            _dictationState.value = _dictationState.value.copy(
+                isLiveDictating = true,
+                errorMessage = null,
+                statusNote = "Listening offline (On-Device ASR + Local Lexicon)..."
+            )
+            localSpeechManager.startOfflineSpeechRecognizer(
+                language = language,
+                trainedLexicon = trainedLexicon,
+                onPartial = { partial ->
+                    _dictationState.value = _dictationState.value.copy(partialChunkText = partial)
+                },
+                onFinal = { finalChunk ->
+                    val existing = _dictationState.value.liveText.trim()
+                    val combined = if (existing.isEmpty()) finalChunk else "$existing $finalChunk"
+                    _dictationState.value = _dictationState.value.copy(
+                        liveText = combined,
+                        partialChunkText = "",
+                        lastLatencyMs = 80L
+                    )
+                },
+                onRms = { norm ->
+                    _localAmplitude.value = norm
+                },
+                onError = { err ->
+                    usingSystemOfflineRecognizer = false
+                    localSpeechManager.stopOfflineSpeechRecognizer()
+                    startLocalDtwFallbackCapture(language, activeProfile, localWeights, err)
+                }
+            )
+        } else {
+            startLocalDtwFallbackCapture(language, activeProfile, localWeights, null)
+        }
+    }
+
+    private fun startLocalDtwFallbackCapture(
+        language: SpeechLanguage,
+        activeProfile: VoiceModelProfile?,
+        preloadedWeights: LocalTrainedWeights?,
+        notePrefix: String?
+    ) {
+        usingSystemOfflineRecognizer = false
+        val weights = preloadedWeights ?: localSpeechManager.loadLatestLocalWeights(currentUserId, language)
+        if (weights == null || weights.templates.isEmpty()) {
+            _dictationState.value = _dictationState.value.copy(
+                isLiveDictating = false,
+                errorMessage = "No local model trained for ${language.label} yet. Download the local pack and train a Local Acoustic Model in the Models tab first."
+            )
+            return
+        }
+
+        val banner = if (notePrefix != null) {
+            "$notePrefix • Switched to Local DTW (${weights.templates.size} templates)"
+        } else {
+            "Listening offline via Local Acoustic DTW (${weights.templates.size} templates) • Noise gated"
+        }
+        _dictationState.value = _dictationState.value.copy(
+            isLiveDictating = true,
+            errorMessage = null,
+            statusNote = banner
+        )
+
+        audioEngine.startRecording(
+            scope = viewModelScope,
+            chunkDurationMs = 2000L,
+            filterSilence = true,
+            onChunkReady = { pcmChunk ->
+                val startMs = System.currentTimeMillis()
+                val match = localSpeechManager.matchLocalPcmChunk(pcmChunk, weights)
+                val latency = System.currentTimeMillis() - startMs
+                if (match != null) {
+                    val existing = _dictationState.value.liveText.trim()
+                    val combined = if (existing.isEmpty()) match.phraseText else "$existing ${match.phraseText}"
+                    _dictationState.value = _dictationState.value.copy(
+                        liveText = combined,
+                        partialChunkText = "",
+                        lastLatencyMs = latency,
+                        statusNote = "Matched offline (${(match.confidence * 100).toInt()}% fit • ${activeProfile?.name ?: weights.modelName})"
+                    )
+                } else {
+                    _dictationState.value = _dictationState.value.copy(
+                        statusNote = "Listening offline • Speak a trained phrase clearly"
+                    )
+                }
+            },
+            onSilenceFiltered = {
+                _dictationState.value = _dictationState.value.copy(
+                    statusNote = "Listening offline • Silence & background noise gated"
+                )
+            },
+            onError = { msg ->
+                _dictationState.value = _dictationState.value.copy(
+                    isLiveDictating = false,
+                    errorMessage = msg
+                )
+            }
+        )
+    }
+
+    private fun processCloudDictationChunk(
         architecture: VoiceArchitecture,
         language: SpeechLanguage,
         activeProfile: VoiceModelProfile?,
@@ -514,7 +745,7 @@ class VoxBridgeViewModel(
                 Log.e(TAG, "Dictation streaming failed", e)
                 _dictationState.value = _dictationState.value.copy(
                     isProcessingChunk = false,
-                    errorMessage = e.localizedMessage ?: "Dictation failed."
+                    errorMessage = formatFriendlyAiError(e, architecture)
                 )
             }
         }
@@ -522,9 +753,17 @@ class VoxBridgeViewModel(
 
     fun stopRealtimeDictation() {
         if (!_dictationState.value.isLiveDictating) return
-        audioEngine.stopRecording()
+        if (usingSystemOfflineRecognizer) {
+            localSpeechManager.stopOfflineSpeechRecognizer()
+            usingSystemOfflineRecognizer = false
+            _localAmplitude.value = 0f
+        } else {
+            audioEngine.stopRecording()
+        }
         _dictationState.value = _dictationState.value.copy(
             isLiveDictating = false,
+            partialChunkText = "",
+            isProcessingChunk = false,
             statusNote = "Dictation paused."
         )
     }
@@ -545,8 +784,7 @@ class VoxBridgeViewModel(
         val text = _dictationState.value.liveText.trim()
         if (text.isEmpty()) return
         val profile = getActiveVoiceProfile()
-        val arch = profile?.let { VoiceArchitecture.fromName(it.architecture) }
-            ?: _dictationState.value.selectedArchitecture
+        val arch = _dictationState.value.selectedArchitecture
         viewModelScope.launch {
             val res = repository.saveDictation(
                 modelId = profile?.id ?: arch.name,
@@ -572,9 +810,10 @@ class VoxBridgeViewModel(
     fun speakTextAloud(text: String, dictationId: String? = null) {
         val cleanText = text.trim()
         if (cleanText.isEmpty()) return
+        val voiceGender = _selectedVoiceGender.value
         viewModelScope.launch {
             _dictationState.value = _dictationState.value.copy(isSpeakingTts = true, errorMessage = null)
-            val result = aiService.synthesizeSpeech(cleanText, _selectedLanguage.value)
+            val result = aiService.synthesizeSpeech(cleanText, _selectedLanguage.value, voiceGender)
             result.onSuccess { audio ->
                 audioEngine.playPcmBytes(
                     scope = viewModelScope,
@@ -585,10 +824,10 @@ class VoxBridgeViewModel(
                     }
                 )
             }.onFailure {
-                aiService.speakWithSystemTtsFallback(cleanText, _selectedLanguage.value)
+                aiService.speakWithSystemTtsFallback(cleanText, _selectedLanguage.value, voiceGender)
                 _dictationState.value = _dictationState.value.copy(
                     isSpeakingTts = false,
-                    statusNote = "Spoken via on-device voice fallback."
+                    statusNote = "Spoken via ${voiceGender.displayName.lowercase()} on-device voice."
                 )
             }
             if (dictationId != null) {
@@ -607,11 +846,12 @@ class VoxBridgeViewModel(
         if (_liveState.value.isConnected || _liveState.value.isConnecting) return
         val profile = getActiveVoiceProfile()
         val language = _selectedLanguage.value
+        val voiceGender = _selectedVoiceGender.value
 
         liveSessionJob = viewModelScope.launch {
             _liveState.value = LiveConversationState(isConnecting = true)
             try {
-                val session = aiService.connectLiveSession(language, profile)
+                val session = aiService.connectLiveSession(language, profile, voiceGender)
                 activeLiveSession = session
                 _liveState.value = LiveConversationState(isConnected = true)
                 session.startAudioConversation(
@@ -658,6 +898,19 @@ class VoxBridgeViewModel(
         }
     }
 
+    private fun formatFriendlyAiError(e: Exception, architecture: VoiceArchitecture): String {
+        val raw = e.localizedMessage.orEmpty()
+        return if (raw.contains("limit: 0", ignoreCase = true) ||
+            raw.contains("free_tier", ignoreCase = true) ||
+            (architecture.tier == ModelTier.PAID && raw.contains("quota", ignoreCase = true))
+        ) {
+            "${architecture.displayName} (${architecture.geminiModelId}) requires a paid Blaze billing plan. " +
+                "Switch to a Free Tier model (Gemini 3.8 Flash or Gemini 3.5 Flash-Lite) or train a Local Acoustic Model offline."
+        } else {
+            raw.ifBlank { "AI model request failed." }
+        }
+    }
+
     private fun refreshStorageStats() {
         _storageStats.value = storageManager.getStorageStats(currentUserId)
     }
@@ -677,6 +930,7 @@ class VoxBridgeViewModel(
 
     override fun onCleared() {
         super.onCleared()
+        localSpeechManager.stopOfflineSpeechRecognizer()
         audioEngine.release()
         aiService.release()
         liveSessionJob?.cancel()

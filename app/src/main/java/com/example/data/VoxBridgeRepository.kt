@@ -7,6 +7,7 @@ import com.example.firebase.handleFirestoreError
 import com.example.model.CustomPhrase
 import com.example.model.DictationEntry
 import com.example.model.ModelStatus
+import com.example.model.SpeakingVoiceGender
 import com.example.model.SpeechLanguage
 import com.example.model.SpeechRecording
 import com.example.model.UserProfile
@@ -78,6 +79,7 @@ class VoxBridgeRepository(
                     "userId" to uid,
                     "displayName" to safeName,
                     "preferredLanguage" to SpeechLanguage.ENGLISH.code,
+                    "preferredVoiceGender" to SpeakingVoiceGender.FEMALE.name,
                     "createdAt" to FieldValue.serverTimestamp(),
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
@@ -94,7 +96,8 @@ class VoxBridgeRepository(
 
     suspend fun updateUserPreferences(
         preferredLanguage: SpeechLanguage? = null,
-        activeModelId: String? = null
+        activeModelId: String? = null,
+        preferredVoiceGender: SpeakingVoiceGender? = null
     ): Result<Unit> {
         var docPath = "users/unknown"
         return try {
@@ -110,6 +113,9 @@ class VoxBridgeRepository(
             if (activeModelId != null) {
                 require(activeModelId.length <= 128)
                 updates["activeModelId"] = activeModelId
+            }
+            if (preferredVoiceGender != null) {
+                updates["preferredVoiceGender"] = preferredVoiceGender.name
             }
             docRef.update(updates).await()
             Result.success(Unit)

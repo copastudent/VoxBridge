@@ -70,11 +70,12 @@ test("UserProfile: owner create, partial update, cross-user denial, and ghost fi
     })
   );
 
-  // Partial update
+  // Partial update including preferredVoiceGender
   await assertSucceeds(
     aliceDb.collection("users").doc(ALICE_UID).update({
       preferredLanguage: "gu",
       activeModelId: "model_1",
+      preferredVoiceGender: "MALE",
       updatedAt: new Date(Date.now() - 1000),
     })
   );
@@ -175,15 +176,33 @@ test("VoiceModelProfile: training, retrain, terminal ARCHIVED lock, and delete",
   await assertSucceeds(
     aliceDb.collection("users").doc(ALICE_UID).collection("voice_models").doc("vm_1").set({
       userId: ALICE_UID,
-      name: "Carbon Deep Profile",
-      architecture: "DEEP_PHONETIC",
-      geminiModelId: "gemini-4-carbon",
+      name: "Free Flash Profile",
+      architecture: "ADAPTIVE_FLASH",
+      geminiModelId: "gemini-3.8-flash",
       language: "en",
       trainingSampleCount: 12,
       phoneticProfileSummary: "Softens final stops and lengthens medial vowels.",
       adaptationPrompt: "Speaker tends to devoice final /d/ and soften /θ/.",
       articulationPatterns: ["Final /d/ -> /t/ softening", "Prolonged vowel transitions"],
       confidenceScore: 88,
+      status: "READY",
+      createdAt: past,
+      updatedAt: past,
+    })
+  );
+
+  await assertSucceeds(
+    aliceDb.collection("users").doc(ALICE_UID).collection("voice_models").doc("vm_local").set({
+      userId: ALICE_UID,
+      name: "Offline Acoustic Local",
+      architecture: "LOCAL_ON_DEVICE",
+      geminiModelId: "local-on-device-v1",
+      language: "en",
+      trainingSampleCount: 25,
+      phoneticProfileSummary: "Local 10-band DTW acoustic model trained on 25 WAV samples.",
+      adaptationPrompt: "Local on-device personalized acoustic matching enabled.",
+      articulationPatterns: ["On-device spectral template matching"],
+      confidenceScore: 85,
       status: "READY",
       createdAt: past,
       updatedAt: past,

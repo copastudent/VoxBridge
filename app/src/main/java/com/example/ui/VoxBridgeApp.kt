@@ -55,6 +55,7 @@ import com.example.audio.AudioStorageManager
 import com.example.auth.signOutUser
 import com.example.data.PhraseAssetRepository
 import com.example.data.VoxBridgeRepository
+import com.example.local.LocalSpeechModelManager
 import com.example.model.UiState
 import com.example.ui.screens.AuthScreen
 import com.example.ui.screens.DictateScreen
@@ -135,6 +136,7 @@ private fun AuthenticatedStudioShell(
                     storageManager = AudioStorageManager(app),
                     audioEngine = AudioRecorderEngine(),
                     aiService = VoiceAiService(app),
+                    localSpeechManager = LocalSpeechModelManager(app),
                     currentUserId = currentUserId,
                     initialDisplayName = displayName
                 )
@@ -162,6 +164,7 @@ private fun AuthenticatedStudioShell(
     }
 
     val selectedLanguage by viewModel.selectedLanguage.collectAsStateWithLifecycle()
+    val selectedVoiceGender by viewModel.selectedVoiceGender.collectAsStateWithLifecycle()
     val currentPhraseIndex by viewModel.currentPhraseIndex.collectAsStateWithLifecycle()
     val phrases by viewModel.mergedPhrases.collectAsStateWithLifecycle()
     val recordingsState by viewModel.recordingsState.collectAsStateWithLifecycle()
@@ -173,9 +176,12 @@ private fun AuthenticatedStudioShell(
     val dictationState by viewModel.dictationState.collectAsStateWithLifecycle()
     val trainingState by viewModel.trainingState.collectAsStateWithLifecycle()
     val liveState by viewModel.liveState.collectAsStateWithLifecycle()
+    val localPackStatuses by viewModel.localPackStatuses.collectAsStateWithLifecycle()
 
     val isRecording by viewModel.audioEngine.isRecording.collectAsStateWithLifecycle()
-    val amplitudeLevel by viewModel.audioEngine.amplitudeLevel.collectAsStateWithLifecycle()
+    val engineAmplitude by viewModel.audioEngine.amplitudeLevel.collectAsStateWithLifecycle()
+    val localAmplitude by viewModel.localAmplitude.collectAsStateWithLifecycle()
+    val amplitudeLevel = maxOf(engineAmplitude, localAmplitude)
     val elapsedMs by viewModel.audioEngine.elapsedMs.collectAsStateWithLifecycle()
 
     val recordings = (recordingsState as? UiState.Success)?.data.orEmpty()
@@ -269,6 +275,7 @@ private fun AuthenticatedStudioShell(
                             trainedModels = models,
                             activeModelId = activeModelId,
                             selectedLanguage = selectedLanguage,
+                            selectedVoiceGender = selectedVoiceGender,
                             amplitudeLevel = amplitudeLevel,
                             history = dictations,
                             hasMicPermission = hasMicPermission,
@@ -277,6 +284,7 @@ private fun AuthenticatedStudioShell(
                             },
                             onSelectTrainedModel = viewModel::selectActiveVoiceModel,
                             onSelectArchitecturePreset = viewModel::selectArchitecturePreset,
+                            onSelectVoiceGender = viewModel::setVoiceGender,
                             onStartDictation = viewModel::startRealtimeDictation,
                             onStopDictation = viewModel::stopRealtimeDictation,
                             onTextChanged = viewModel::updateDictationText,
@@ -294,6 +302,9 @@ private fun AuthenticatedStudioShell(
                             activeModelId = activeModelId,
                             selectedLanguage = selectedLanguage,
                             trainingState = trainingState,
+                            localPackStatuses = localPackStatuses,
+                            onDownloadLocalPack = viewModel::downloadLocalModelPack,
+                            onDeleteLocalPack = viewModel::deleteLocalModelPack,
                             onTrainModel = viewModel::trainNewVoiceModel,
                             onSelectActiveModel = viewModel::selectActiveVoiceModel,
                             onRenameModel = viewModel::renameVoiceModel,

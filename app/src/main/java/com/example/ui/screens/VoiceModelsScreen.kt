@@ -19,12 +19,16 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.DownloadForOffline
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.OfflinePin
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
@@ -57,6 +61,9 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.R
+import com.example.local.LocalPackStatus
+import com.example.local.OfflineAsrPackState
+import com.example.model.ModelTier
 import com.example.model.SpeechLanguage
 import com.example.model.SpeechRecording
 import com.example.model.VoiceArchitecture
@@ -71,6 +78,9 @@ fun VoiceModelsScreen(
     activeModelId: String,
     selectedLanguage: SpeechLanguage,
     trainingState: TrainingUiState,
+    localPackStatuses: Map<SpeechLanguage, LocalPackStatus>,
+    onDownloadLocalPack: (SpeechLanguage) -> Unit,
+    onDeleteLocalPack: (SpeechLanguage) -> Unit,
     onTrainModel: (name: String, arch: VoiceArchitecture, lang: SpeechLanguage) -> Unit,
     onSelectActiveModel: (VoiceModelProfile) -> Unit,
     onRenameModel: (modelId: String, newName: String) -> Unit,
@@ -79,6 +89,8 @@ fun VoiceModelsScreen(
 ) {
     var showTrainDialog by remember { mutableStateOf(false) }
     var modelToRename by remember { mutableStateOf<VoiceModelProfile?>(null) }
+
+    val currentPackStatus = localPackStatuses[selectedLanguage] ?: LocalPackStatus(selectedLanguage)
 
     Box(
         modifier = Modifier.fillMaxSize(),
@@ -117,7 +129,7 @@ fun VoiceModelsScreen(
                                 color = MaterialTheme.colorScheme.onSurface
                             )
                             Text(
-                                text = "Train acoustic-phonetic models from your ${recordings.size} recorded speech samples using Gemini High Thinking calibration. Create multiple models to compare speed and accuracy.",
+                                text = "Train acoustic-phonetic models from your ${recordings.size} recorded speech samples using Free Tier Gemini cloud models, Paid Blaze models, or an Offline Local Acoustic Model.",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -149,6 +161,145 @@ fun VoiceModelsScreen(
                 }
             }
 
+            // Downloadable Local On-Device Model Pack Card
+            item {
+                val isDownloading = currentPackStatus.offlineAsrState == OfflineAsrPackState.DOWNLOADING
+                val packReady = currentPackStatus.localLexiconReady ||
+                    currentPackStatus.offlineAsrState == OfflineAsrPackState.INSTALLED
+
+                Card(
+                    shape = RoundedCornerShape(20.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("local_model_pack_card")
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(
+                                    imageVector = if (packReady) Icons.Filled.OfflinePin else Icons.Filled.DownloadForOffline,
+                                    contentDescription = "Local offline speech model status",
+                                    tint = if (packReady) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Column {
+                                    Text(
+                                        text = "Offline Local Model Pack (${selectedLanguage.label})",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Text(
+                                        text = currentPackStatus.statusDetail,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+
+                            if (currentPackStatus.localLexiconReady) {
+                                IconButton(
+                                    onClick = { onDeleteLocalPack(selectedLanguage) },
+                                    modifier = Modifier
+                                        .minimumInteractiveComponentSize()
+                                        .testTag("delete_local_pack_button")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Filled.DeleteOutline,
+                                        contentDescription = "Delete downloaded local voice pack",
+                                        tint = MaterialTheme.colorScheme.error
+                                    )
+                                }
+                            }
+                        }
+
+                        if (currentPackStatus.localLexiconReady || currentPackStatus.offlineAsrState == OfflineAsrPackState.INSTALLED) {
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                if (currentPackStatus.localLexiconReady) {
+                                    Surface(
+                                        shape = RoundedCornerShape(8.dp),
+                                        color = MaterialTheme.colorScheme.primaryContainer
+                                    ) {
+                                        Text(
+                                            text = "Lexicon: ${currentPackStatus.localLexiconSizeKb} KB",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                        )
+                                    }
+                                }
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = MaterialTheme.colorScheme.secondaryContainer
+                                ) {
+                                    Text(
+                                        text = when (currentPackStatus.offlineAsrState) {
+                                            OfflineAsrPackState.INSTALLED -> "System Offline ASR: Installed"
+                                            OfflineAsrPackState.DOWNLOADABLE -> "System Offline ASR: Downloadable"
+                                            OfflineAsrPackState.DOWNLOADING -> "Downloading ASR Pack..."
+                                            OfflineAsrPackState.CHECKING -> "Checking Offline Support..."
+                                            OfflineAsrPackState.UNAVAILABLE -> "Local DTW Engine Ready"
+                                        },
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                    )
+                                }
+                            }
+                        }
+
+                        if (isDownloading) {
+                            LinearProgressIndicator(
+                                progress = { (currentPackStatus.downloadProgressPct / 100f).coerceIn(0f, 1f) },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(6.dp)
+                                    .clip(RoundedCornerShape(3.dp))
+                            )
+                        }
+
+                        OutlinedButton(
+                            onClick = { onDownloadLocalPack(selectedLanguage) },
+                            enabled = !isDownloading,
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .minimumInteractiveComponentSize()
+                                .testTag("download_local_pack_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.DownloadForOffline,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = when {
+                                    isDownloading -> "Downloading (${currentPackStatus.downloadProgressPct}%)..."
+                                    packReady -> "Update / Verify Local ${selectedLanguage.label} Pack"
+                                    else -> "Download Local ${selectedLanguage.label} Model Pack"
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+
             item {
                 AnimatedVisibility(visible = trainingState.trainingMessage != null || trainingState.errorMessage != null) {
                     val isError = trainingState.errorMessage != null
@@ -168,7 +319,10 @@ fun VoiceModelsScreen(
                                 color = if (isError) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onPrimaryContainer,
                                 modifier = Modifier.weight(1f)
                             )
-                            TextButton(onClick = onDismissTrainingBanner) {
+                            TextButton(
+                                onClick = onDismissTrainingBanner,
+                                modifier = Modifier.minimumInteractiveComponentSize()
+                            ) {
                                 Text("OK")
                             }
                         }
@@ -207,7 +361,7 @@ fun VoiceModelsScreen(
                                 style = MaterialTheme.typography.titleMedium
                             )
                             Text(
-                                text = "Record a few phrases in the Record tab, then start a training session above to calibrate your first personal speech model.",
+                                text = "Record a few phrases in the Record tab, then start a Free, Paid, or Local offline training session above.",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -243,15 +397,17 @@ fun VoiceModelsScreen(
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
                                         Text(
                                             text = profile.name,
                                             style = MaterialTheme.typography.titleLarge,
                                             color = MaterialTheme.colorScheme.onSurface
                                         )
                                         if (isActive) {
-                                            Spacer(modifier = Modifier.width(8.dp))
                                             Icon(
                                                 imageVector = Icons.Filled.CheckCircle,
                                                 contentDescription = "Active voice model",
@@ -260,15 +416,42 @@ fun VoiceModelsScreen(
                                             )
                                         }
                                     }
-                                    Text(
-                                        text = "${arch.displayName} (${profile.geminiModelId}) • ${lang.label}",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Surface(
+                                            shape = RoundedCornerShape(6.dp),
+                                            color = when (arch.tier) {
+                                                ModelTier.FREE -> MaterialTheme.colorScheme.primaryContainer
+                                                ModelTier.PAID -> MaterialTheme.colorScheme.tertiaryContainer
+                                                ModelTier.LOCAL -> MaterialTheme.colorScheme.secondaryContainer
+                                            }
+                                        ) {
+                                            Text(
+                                                text = arch.tier.shortLabel,
+                                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                                color = when (arch.tier) {
+                                                    ModelTier.FREE -> MaterialTheme.colorScheme.onPrimaryContainer
+                                                    ModelTier.PAID -> MaterialTheme.colorScheme.onTertiaryContainer
+                                                    ModelTier.LOCAL -> MaterialTheme.colorScheme.onSecondaryContainer
+                                                },
+                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                            )
+                                        }
+                                        Text(
+                                            text = "${arch.displayName} (${profile.geminiModelId}) • ${lang.label}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
                                 }
 
                                 Row {
-                                    IconButton(onClick = { modelToRename = profile }) {
+                                    IconButton(
+                                        onClick = { modelToRename = profile },
+                                        modifier = Modifier.minimumInteractiveComponentSize()
+                                    ) {
                                         Icon(
                                             imageVector = Icons.Filled.Edit,
                                             contentDescription = "Rename voice model"
@@ -276,7 +459,9 @@ fun VoiceModelsScreen(
                                     }
                                     IconButton(
                                         onClick = { onDeleteModel(profile.id) },
-                                        modifier = Modifier.testTag("delete_model_${profile.id}")
+                                        modifier = Modifier
+                                            .minimumInteractiveComponentSize()
+                                            .testTag("delete_model_${profile.id}")
                                     ) {
                                         Icon(
                                             imageVector = Icons.Filled.DeleteOutline,
@@ -357,14 +542,20 @@ fun VoiceModelsScreen(
 
     if (showTrainDialog) {
         var nameInput by remember { mutableStateOf("My ${selectedLanguage.label} Voice") }
-        var selectedArch by remember { mutableStateOf(VoiceArchitecture.DEEP_PHONETIC) }
         var trainLang by remember { mutableStateOf(selectedLanguage) }
+        var selectedTier by remember { mutableStateOf(ModelTier.FREE) }
+        var selectedArch by remember { mutableStateOf(VoiceArchitecture.ADAPTIVE_FLASH) }
+        val tierArchitectures = VoiceArchitecture.byTier(selectedTier)
+        val langPack = localPackStatuses[trainLang]
 
         AlertDialog(
             onDismissRequest = { showTrainDialog = false },
             title = { Text("New Voice Training Session") },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Column(
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
                     OutlinedTextField(
                         value = nameInput,
                         onValueChange = { if (it.length <= 60) nameInput = it },
@@ -382,14 +573,51 @@ fun VoiceModelsScreen(
                                 selected = trainLang == lang,
                                 onClick = { trainLang = lang },
                                 label = { Text(lang.nativeLabel) },
-                                modifier = Modifier.minimumInteractiveComponentSize()
+                                modifier = Modifier
+                                    .minimumInteractiveComponentSize()
+                                    .testTag("train_lang_${lang.code}")
+                            )
+                        }
+                    }
+
+                    Text("Model Tier", style = MaterialTheme.typography.labelLarge)
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        ModelTier.entries.forEach { tier ->
+                            FilterChip(
+                                selected = selectedTier == tier,
+                                onClick = {
+                                    selectedTier = tier
+                                    selectedArch = VoiceArchitecture.byTier(tier).first()
+                                },
+                                label = { Text(tier.shortLabel) },
+                                modifier = Modifier
+                                    .minimumInteractiveComponentSize()
+                                    .testTag("train_tier_${tier.name}")
+                            )
+                        }
+                    }
+
+                    if (selectedTier == ModelTier.LOCAL && langPack?.localLexiconReady != true) {
+                        Surface(
+                            color = MaterialTheme.colorScheme.secondaryContainer,
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = "Tip: Download the Local ${trainLang.label} Model Pack on the Models screen for hybrid on-device ASR + personalized DTW templates.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                modifier = Modifier.padding(10.dp)
                             )
                         }
                     }
 
                     Text("Select Model Architecture", style = MaterialTheme.typography.labelLarge)
                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        VoiceArchitecture.entries.forEach { arch ->
+                        tierArchitectures.forEach { arch ->
                             FilterChip(
                                 selected = selectedArch == arch,
                                 onClick = { selectedArch = arch },
@@ -399,7 +627,10 @@ fun VoiceModelsScreen(
                                         Text(arch.description, style = MaterialTheme.typography.bodySmall)
                                     }
                                 },
-                                modifier = Modifier.fillMaxWidth()
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .minimumInteractiveComponentSize()
+                                    .testTag("train_arch_${arch.name}")
                             )
                         }
                     }
@@ -411,13 +642,18 @@ fun VoiceModelsScreen(
                         onTrainModel(nameInput, selectedArch, trainLang)
                         showTrainDialog = false
                     },
-                    modifier = Modifier.testTag("confirm_train_model_button")
+                    modifier = Modifier
+                        .minimumInteractiveComponentSize()
+                        .testTag("confirm_train_model_button")
                 ) {
                     Text("Train Now")
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showTrainDialog = false }) {
+                TextButton(
+                    onClick = { showTrainDialog = false },
+                    modifier = Modifier.minimumInteractiveComponentSize()
+                ) {
                     Text("Cancel")
                 }
             }
@@ -446,13 +682,17 @@ fun VoiceModelsScreen(
                             onRenameModel(renaming.id, newName)
                             modelToRename = null
                         }
-                    }
+                    },
+                    modifier = Modifier.minimumInteractiveComponentSize()
                 ) {
                     Text("Save")
                 }
             },
             dismissButton = {
-                TextButton(onClick = { modelToRename = null }) {
+                TextButton(
+                    onClick = { modelToRename = null },
+                    modifier = Modifier.minimumInteractiveComponentSize()
+                ) {
                     Text("Cancel")
                 }
             }

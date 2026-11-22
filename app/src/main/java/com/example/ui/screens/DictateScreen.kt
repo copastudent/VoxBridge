@@ -4,6 +4,8 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -26,9 +28,13 @@ import androidx.compose.material.icons.filled.BookmarkAdd
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.Face
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.NoiseControlOff
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PhoneInTalk
+import androidx.compose.material.icons.filled.RecordVoiceOver
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -59,6 +65,8 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.model.DictationEntry
+import com.example.model.ModelTier
+import com.example.model.SpeakingVoiceGender
 import com.example.model.SpeechLanguage
 import com.example.model.VoiceArchitecture
 import com.example.model.VoiceModelProfile
@@ -66,6 +74,7 @@ import com.example.ui.components.LiveAudioWaveform
 import com.example.viewmodel.DictationUiState
 import com.example.viewmodel.LiveConversationState
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun DictateScreen(
     dictationState: DictationUiState,
@@ -73,12 +82,14 @@ fun DictateScreen(
     trainedModels: List<VoiceModelProfile>,
     activeModelId: String,
     selectedLanguage: SpeechLanguage,
+    selectedVoiceGender: SpeakingVoiceGender,
     amplitudeLevel: Float,
     history: List<DictationEntry>,
     hasMicPermission: Boolean,
     onRequestMicPermission: () -> Unit,
     onSelectTrainedModel: (VoiceModelProfile) -> Unit,
     onSelectArchitecturePreset: (VoiceArchitecture) -> Unit,
+    onSelectVoiceGender: (SpeakingVoiceGender) -> Unit,
     onStartDictation: () -> Unit,
     onStopDictation: () -> Unit,
     onTextChanged: (String) -> Unit,
@@ -91,8 +102,13 @@ fun DictateScreen(
 ) {
     val clipboard = LocalClipboardManager.current
     var showLiveDialog by remember { mutableStateOf(false) }
+    var selectedTierFilter by remember { mutableStateOf<ModelTier?>(null) }
 
     val activeProfile = trainedModels.firstOrNull { it.id == activeModelId } ?: trainedModels.firstOrNull()
+    val filteredArchitectures = remember(selectedTierFilter) {
+        val tier = selectedTierFilter
+        if (tier == null) VoiceArchitecture.entries else VoiceArchitecture.byTier(tier)
+    }
 
     Box(
         modifier = Modifier.fillMaxSize(),
@@ -148,7 +164,7 @@ fun DictateScreen(
                 }
             }
 
-            // Voice Model Selector (Multiple Models for Best Fit)
+            // Voice Model Selector & Tier Filter (Free / Paid / Local)
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
@@ -180,7 +196,7 @@ fun DictateScreen(
                                         )
                                     },
                                     label = {
-                                        Text("${profile.name} (${arch.latencyProfile})")
+                                        Text("${profile.name} (${arch.tier.shortLabel})")
                                     },
                                     modifier = Modifier
                                         .minimumInteractiveComponentSize()
@@ -190,12 +206,45 @@ fun DictateScreen(
                         }
                     }
 
-                    // Engine Presets row so users can compare architectures on the fly
+                    // Model Tier Filter (All / Free / Paid / Local)
                     LazyRow(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        items(VoiceArchitecture.entries) { arch ->
+                        item {
+                            FilterChip(
+                                selected = selectedTierFilter == null,
+                                onClick = { selectedTierFilter = null },
+                                label = { Text("All Engines") },
+                                modifier = Modifier
+                                    .minimumInteractiveComponentSize()
+                                    .testTag("tier_filter_all")
+                            )
+                        }
+                        items(ModelTier.entries) { tier ->
+                            FilterChip(
+                                selected = selectedTierFilter == tier,
+                                onClick = {
+                                    selectedTierFilter = tier
+                                    val firstInTier = VoiceArchitecture.byTier(tier).firstOrNull()
+                                    if (firstInTier != null && dictationState.selectedArchitecture.tier != tier) {
+                                        onSelectArchitecturePreset(firstInTier)
+                                    }
+                                },
+                                label = { Text(tier.shortLabel) },
+                                modifier = Modifier
+                                    .minimumInteractiveComponentSize()
+                                    .testTag("tier_filter_${tier.name}")
+                            )
+                        }
+                    }
+
+                    // Engine Presets row so users can compare Free, Paid, and Local architectures on the fly
+                    LazyRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        items(filteredArchitectures, key = { it.name }) { arch ->
                             FilterChip(
                                 selected = dictationState.selectedArchitecture == arch,
                                 onClick = { onSelectArchitecturePreset(arch) },
@@ -250,9 +299,9 @@ fun DictateScreen(
                                     Spacer(modifier = Modifier.width(6.dp))
                                     Text(
                                         text = if (dictationState.isLiveDictating) {
-                                            "LIVE STREAMING"
+                                            "LIVE STREAMING • ${dictationState.selectedArchitecture.tier.shortLabel.uppercase()}"
                                         } else {
-                                            dictationState.selectedArchitecture.geminiModelId
+                                            "${dictationState.selectedArchitecture.geminiModelId} • ${dictationState.selectedArchitecture.tier.shortLabel}"
                                         },
                                         style = MaterialTheme.typography.labelMedium
                                     )
@@ -288,6 +337,34 @@ fun DictateScreen(
                                 .testTag("dictation_text_field")
                         )
 
+                        AnimatedVisibility(visible = !dictationState.statusNote.isNullOrBlank()) {
+                            Surface(
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("dictation_status_note")
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Filled.NoiseControlOff,
+                                        contentDescription = "Noise filter and engine status",
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Text(
+                                        text = dictationState.statusNote.orEmpty(),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+
                         AnimatedVisibility(visible = dictationState.partialChunkText.isNotBlank() || dictationState.isProcessingChunk) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
@@ -317,6 +394,63 @@ fun DictateScreen(
                                     color = MaterialTheme.colorScheme.onErrorContainer,
                                     modifier = Modifier.padding(10.dp)
                                 )
+                            }
+                        }
+
+                        // Speaking Voice Selection (Female / Male)
+                        Surface(
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                            shape = RoundedCornerShape(14.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Filled.RecordVoiceOver,
+                                        contentDescription = "Speaking voice gender",
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Text(
+                                        text = "Speaking Voice",
+                                        style = MaterialTheme.typography.labelLarge,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                }
+                                FlowRow(
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    SpeakingVoiceGender.entries.forEach { gender ->
+                                        FilterChip(
+                                            selected = selectedVoiceGender == gender,
+                                            onClick = { onSelectVoiceGender(gender) },
+                                            leadingIcon = {
+                                                Icon(
+                                                    imageVector = if (gender == SpeakingVoiceGender.FEMALE) {
+                                                        Icons.Filled.Face
+                                                    } else {
+                                                        Icons.Filled.Person
+                                                    },
+                                                    contentDescription = null,
+                                                    modifier = Modifier.size(16.dp)
+                                                )
+                                            },
+                                            label = {
+                                                Text("${gender.displayName} • ${gender.geminiVoiceName}")
+                                            },
+                                            modifier = Modifier
+                                                .minimumInteractiveComponentSize()
+                                                .testTag("voice_gender_${gender.name}")
+                                        )
+                                    }
+                                }
                             }
                         }
 
@@ -390,7 +524,7 @@ fun DictateScreen(
                                     } else {
                                         Icon(
                                             imageVector = Icons.AutoMirrored.Filled.VolumeUp,
-                                            contentDescription = "Speak dictated text aloud"
+                                            contentDescription = "Speak dictated text aloud (${selectedVoiceGender.displayName})"
                                         )
                                     }
                                     Spacer(modifier = Modifier.width(6.dp))
@@ -407,7 +541,8 @@ fun DictateScreen(
                                 onClick = {
                                     clipboard.setText(AnnotatedString(dictationState.liveText))
                                 },
-                                enabled = dictationState.liveText.isNotBlank()
+                                enabled = dictationState.liveText.isNotBlank(),
+                                modifier = Modifier.minimumInteractiveComponentSize()
                             ) {
                                 Icon(Icons.Filled.ContentCopy, contentDescription = "Copy text", modifier = Modifier.size(18.dp))
                                 Spacer(modifier = Modifier.width(4.dp))
@@ -416,7 +551,9 @@ fun DictateScreen(
                             TextButton(
                                 onClick = onSaveDictation,
                                 enabled = dictationState.liveText.isNotBlank(),
-                                modifier = Modifier.testTag("save_dictation_button")
+                                modifier = Modifier
+                                    .minimumInteractiveComponentSize()
+                                    .testTag("save_dictation_button")
                             ) {
                                 Icon(Icons.Filled.BookmarkAdd, contentDescription = "Save transcript", modifier = Modifier.size(18.dp))
                                 Spacer(modifier = Modifier.width(4.dp))
@@ -424,7 +561,8 @@ fun DictateScreen(
                             }
                             TextButton(
                                 onClick = onClearText,
-                                enabled = dictationState.liveText.isNotBlank()
+                                enabled = dictationState.liveText.isNotBlank(),
+                                modifier = Modifier.minimumInteractiveComponentSize()
                             ) {
                                 Icon(Icons.Filled.Clear, contentDescription = "Clear text", modifier = Modifier.size(18.dp))
                                 Spacer(modifier = Modifier.width(4.dp))
@@ -487,21 +625,30 @@ fun DictateScreen(
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                                 Row {
-                                    IconButton(onClick = { onSpeakAloud(entry.adaptedText, entry.id) }) {
+                                    IconButton(
+                                        onClick = { onSpeakAloud(entry.adaptedText, entry.id) },
+                                        modifier = Modifier.minimumInteractiveComponentSize()
+                                    ) {
                                         Icon(
                                             imageVector = Icons.AutoMirrored.Filled.VolumeUp,
                                             contentDescription = "Speak entry aloud",
                                             tint = MaterialTheme.colorScheme.primary
                                         )
                                     }
-                                    IconButton(onClick = { clipboard.setText(AnnotatedString(entry.adaptedText)) }) {
+                                    IconButton(
+                                        onClick = { clipboard.setText(AnnotatedString(entry.adaptedText)) },
+                                        modifier = Modifier.minimumInteractiveComponentSize()
+                                    ) {
                                         Icon(
                                             imageVector = Icons.Filled.ContentCopy,
                                             contentDescription = "Copy entry",
                                             tint = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
                                     }
-                                    IconButton(onClick = { onDeleteDictation(entry.id) }) {
+                                    IconButton(
+                                        onClick = { onDeleteDictation(entry.id) },
+                                        modifier = Modifier.minimumInteractiveComponentSize()
+                                    ) {
                                         Icon(
                                             imageVector = Icons.Filled.DeleteOutline,
                                             contentDescription = "Delete entry",
@@ -523,13 +670,13 @@ fun DictateScreen(
                 onStopLiveConversation()
                 showLiveDialog = false
             },
-            title = { Text("Live Voice Bridge (Gemini Live)") },
+            title = { Text("Live Voice Bridge (${selectedVoiceGender.displayName} • ${selectedVoiceGender.geminiVoiceName})") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text(
                         text = when {
-                            liveState.isConnecting -> "Connecting to Gemini 3.8 Live audio stream..."
-                            liveState.isConnected -> "Connected. Speak naturally — VoxBridge listens and replies in real time."
+                            liveState.isConnecting -> "Connecting to Gemini 3.1 Live audio stream..."
+                            liveState.isConnected -> "Connected. Speak naturally — VoxBridge listens and replies using ${selectedVoiceGender.description}."
                             liveState.errorMessage != null -> liveState.errorMessage
                             else -> "Session ready."
                         },
@@ -569,7 +716,8 @@ fun DictateScreen(
                         onStopLiveConversation()
                         showLiveDialog = false
                     },
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary),
+                    modifier = Modifier.minimumInteractiveComponentSize()
                 ) {
                     Text("End Live Session")
                 }
