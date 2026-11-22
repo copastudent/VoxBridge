@@ -1,0 +1,273 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "User preferences, active voice model selection, and preferred recording language.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Authenticated Firebase Auth UID."
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Display name shown in profile."
+        },
+        "preferredLanguage": {
+          "type": "string",
+          "enum": ["en", "gu"],
+          "description": "Preferred speech training language code."
+        },
+        "activeModelId": {
+          "type": "string",
+          "description": "Currently selected voice model profile document ID."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when last updated."
+        }
+      },
+      "required": ["userId", "displayName", "preferredLanguage", "createdAt", "updatedAt"]
+    },
+    "CustomPhrase": {
+      "title": "CustomPhrase",
+      "description": "User-created or customized training phrase.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "language": {
+          "type": "string",
+          "enum": ["en", "gu"]
+        },
+        "category": {
+          "type": "string"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["userId", "text", "language", "category", "createdAt", "updatedAt"]
+    },
+    "SpeechRecording": {
+      "title": "SpeechRecording",
+      "description": "Metadata and controlled local storage path for a recorded non-standard speech phrase.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string"
+        },
+        "phraseKey": {
+          "type": "string"
+        },
+        "phraseText": {
+          "type": "string"
+        },
+        "language": {
+          "type": "string",
+          "enum": ["en", "gu"]
+        },
+        "localFilePath": {
+          "type": "string"
+        },
+        "durationMs": {
+          "type": "integer"
+        },
+        "sampleRateHz": {
+          "type": "integer"
+        },
+        "peakAmplitude": {
+          "type": "integer"
+        },
+        "phoneticNotes": {
+          "type": "string"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "userId",
+        "phraseKey",
+        "phraseText",
+        "language",
+        "localFilePath",
+        "durationMs",
+        "sampleRateHz",
+        "peakAmplitude",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "VoiceModelProfile": {
+      "title": "VoiceModelProfile",
+      "description": "Personalized trained voice model profile with acoustic-phonetic adaptation rules.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "architecture": {
+          "type": "string",
+          "enum": ["DEEP_PHONETIC", "ADAPTIVE_GENERAL", "ULTRA_FAST", "PRECISION_TRANSCRIBE"]
+        },
+        "geminiModelId": {
+          "type": "string"
+        },
+        "language": {
+          "type": "string",
+          "enum": ["en", "gu"]
+        },
+        "trainingSampleCount": {
+          "type": "integer"
+        },
+        "phoneticProfileSummary": {
+          "type": "string"
+        },
+        "adaptationPrompt": {
+          "type": "string"
+        },
+        "articulationPatterns": {
+          "type": "array"
+        },
+        "confidenceScore": {
+          "type": "integer"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["TRAINING", "READY", "ARCHIVED"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "userId",
+        "name",
+        "architecture",
+        "geminiModelId",
+        "language",
+        "trainingSampleCount",
+        "phoneticProfileSummary",
+        "adaptationPrompt",
+        "articulationPatterns",
+        "confidenceScore",
+        "status",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "DictationEntry": {
+      "title": "DictationEntry",
+      "description": "Real-time dictation transcript and speech synthesis log.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string"
+        },
+        "modelId": {
+          "type": "string"
+        },
+        "modelName": {
+          "type": "string"
+        },
+        "language": {
+          "type": "string",
+          "enum": ["en", "gu"]
+        },
+        "rawTranscript": {
+          "type": "string"
+        },
+        "adaptedText": {
+          "type": "string"
+        },
+        "spokenAloud": {
+          "type": "boolean"
+        },
+        "latencyMs": {
+          "type": "integer"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "userId",
+        "modelId",
+        "modelName",
+        "language",
+        "rawTranscript",
+        "adaptedText",
+        "spokenAloud",
+        "latencyMs",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": {
+        "$ref": "#/entities/UserProfile"
+      },
+      "description": "Per-user studio preferences and active voice model pointer."
+    },
+    "/users/{userId}/custom_phrases/{phraseId}": {
+      "schema": {
+        "$ref": "#/entities/CustomPhrase"
+      },
+      "description": "User-customized speech training phrases."
+    },
+    "/users/{userId}/recordings/{recordingId}": {
+      "schema": {
+        "$ref": "#/entities/SpeechRecording"
+      },
+      "description": "User speech recording metadata linked to controlled local storage."
+    },
+    "/users/{userId}/voice_models/{modelId}": {
+      "schema": {
+        "$ref": "#/entities/VoiceModelProfile"
+      },
+      "description": "Trained personalized voice models for non-standard speech."
+    },
+    "/users/{userId}/dictations/{dictationId}": {
+      "schema": {
+        "$ref": "#/entities/DictationEntry"
+      },
+      "description": "Real-time dictation and TTS output history."
+    }
+  }
+}

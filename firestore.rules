@@ -1,0 +1,201 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidLanguage(lang) {
+      return lang is string && (lang == 'en' || lang == 'gu');
+    }
+
+    function isValidUserProfile(data, userId) {
+      return data.userId is string && data.userId == userId && data.userId.size() <= 128 &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 100 &&
+             isValidLanguage(data.preferredLanguage) &&
+             (!('activeModelId' in data) || (data.activeModelId is string && data.activeModelId.size() <= 128)) &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidCustomPhrase(data, userId) {
+      return data.userId is string && data.userId == userId && data.userId.size() <= 128 &&
+             data.text is string && data.text.size() >= 1 && data.text.size() <= 200 &&
+             isValidLanguage(data.language) &&
+             data.category is string && data.category.size() >= 1 && data.category.size() <= 60 &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidSpeechRecording(data, userId) {
+      return data.userId is string && data.userId == userId && data.userId.size() <= 128 &&
+             data.phraseKey is string && data.phraseKey.size() >= 1 && data.phraseKey.size() <= 128 &&
+             data.phraseText is string && data.phraseText.size() >= 1 && data.phraseText.size() <= 240 &&
+             isValidLanguage(data.language) &&
+             data.localFilePath is string && data.localFilePath.size() >= 1 && data.localFilePath.size() <= 512 &&
+             data.durationMs is int && data.durationMs >= 0 && data.durationMs <= 600000 &&
+             data.sampleRateHz is int && data.sampleRateHz >= 8000 && data.sampleRateHz <= 96000 &&
+             data.peakAmplitude is int && data.peakAmplitude >= 0 && data.peakAmplitude <= 65536 &&
+             (!('phoneticNotes' in data) || (data.phoneticNotes is string && data.phoneticNotes.size() <= 500)) &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidVoiceModelProfile(data, userId) {
+      return data.userId is string && data.userId == userId && data.userId.size() <= 128 &&
+             data.name is string && data.name.size() >= 1 && data.name.size() <= 80 &&
+             data.architecture is string &&
+             data.architecture in ['DEEP_PHONETIC', 'ADAPTIVE_GENERAL', 'ULTRA_FAST', 'PRECISION_TRANSCRIBE'] &&
+             data.geminiModelId is string && data.geminiModelId.size() >= 3 && data.geminiModelId.size() <= 80 &&
+             isValidLanguage(data.language) &&
+             data.trainingSampleCount is int && data.trainingSampleCount >= 0 && data.trainingSampleCount <= 10000 &&
+             data.phoneticProfileSummary is string && data.phoneticProfileSummary.size() <= 4000 &&
+             data.adaptationPrompt is string && data.adaptationPrompt.size() <= 8000 &&
+             data.articulationPatterns is list && data.articulationPatterns.size() <= 15 &&
+             (data.articulationPatterns.size() == 0 || (data.articulationPatterns[0] is string && data.articulationPatterns[0].size() <= 200)) &&
+             data.confidenceScore is int && data.confidenceScore >= 0 && data.confidenceScore <= 100 &&
+             data.status is string && data.status in ['TRAINING', 'READY', 'ARCHIVED'] &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidDictationEntry(data, userId) {
+      return data.userId is string && data.userId == userId && data.userId.size() <= 128 &&
+             data.modelId is string && data.modelId.size() >= 1 && data.modelId.size() <= 128 &&
+             data.modelName is string && data.modelName.size() >= 1 && data.modelName.size() <= 80 &&
+             isValidLanguage(data.language) &&
+             data.rawTranscript is string && data.rawTranscript.size() <= 4000 &&
+             data.adaptedText is string && data.adaptedText.size() >= 1 && data.adaptedText.size() <= 4000 &&
+             data.spokenAloud is bool &&
+             data.latencyMs is int && data.latencyMs >= 0 && data.latencyMs <= 300000 &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    match /users/{userId} {
+      allow get: if isOwner(userId) && isValidId(userId);
+      allow list: if false;
+
+      allow create: if isOwner(userId) &&
+                       isValidId(userId) &&
+                       incoming().keys().hasAll(['userId', 'displayName', 'preferredLanguage', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'displayName', 'preferredLanguage', 'activeModelId', 'createdAt', 'updatedAt']) &&
+                       isValidUserProfile(incoming(), userId);
+
+      allow update: if isOwner(userId) &&
+                       isValidId(userId) &&
+                       isValidUserProfile(incoming(), userId) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'preferredLanguage', 'activeModelId', 'updatedAt']);
+
+      allow delete: if isOwner(userId) && isValidId(userId);
+
+      match /custom_phrases/{phraseId} {
+        allow get: if isOwner(userId) && isValidId(phraseId);
+        allow list: if isOwner(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(phraseId) &&
+                         incoming().keys().hasAll(['userId', 'text', 'language', 'category', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['userId', 'text', 'language', 'category', 'createdAt', 'updatedAt']) &&
+                         isValidCustomPhrase(incoming(), userId);
+
+        allow update: if isOwner(userId) &&
+                         isValidId(phraseId) &&
+                         isValidCustomPhrase(incoming(), userId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['text', 'language', 'category', 'updatedAt']);
+
+        allow delete: if isOwner(userId) && isValidId(phraseId);
+      }
+
+      match /recordings/{recordingId} {
+        allow get: if isOwner(userId) && isValidId(recordingId);
+        allow list: if isOwner(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(recordingId) &&
+                         incoming().keys().hasAll(['userId', 'phraseKey', 'phraseText', 'language', 'localFilePath', 'durationMs', 'sampleRateHz', 'peakAmplitude', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['userId', 'phraseKey', 'phraseText', 'language', 'localFilePath', 'durationMs', 'sampleRateHz', 'peakAmplitude', 'phoneticNotes', 'createdAt', 'updatedAt']) &&
+                         isValidSpeechRecording(incoming(), userId);
+
+        allow update: if isOwner(userId) &&
+                         isValidId(recordingId) &&
+                         isValidSpeechRecording(incoming(), userId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['localFilePath', 'durationMs', 'sampleRateHz', 'peakAmplitude', 'phoneticNotes', 'updatedAt']);
+
+        allow delete: if isOwner(userId) && isValidId(recordingId);
+      }
+
+      match /voice_models/{modelId} {
+        allow get: if isOwner(userId) && isValidId(modelId);
+        allow list: if isOwner(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(modelId) &&
+                         incoming().keys().hasAll(['userId', 'name', 'architecture', 'geminiModelId', 'language', 'trainingSampleCount', 'phoneticProfileSummary', 'adaptationPrompt', 'articulationPatterns', 'confidenceScore', 'status', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['userId', 'name', 'architecture', 'geminiModelId', 'language', 'trainingSampleCount', 'phoneticProfileSummary', 'adaptationPrompt', 'articulationPatterns', 'confidenceScore', 'status', 'createdAt', 'updatedAt']) &&
+                         isValidVoiceModelProfile(incoming(), userId);
+
+        allow update: if isOwner(userId) &&
+                         isValidId(modelId) &&
+                         existing().status != 'ARCHIVED' &&
+                         isValidVoiceModelProfile(incoming(), userId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         (
+                           (incoming().diff(existing()).affectedKeys().hasOnly(['name', 'updatedAt'])) ||
+                           (incoming().diff(existing()).affectedKeys().hasOnly(['trainingSampleCount', 'phoneticProfileSummary', 'adaptationPrompt', 'articulationPatterns', 'confidenceScore', 'status', 'updatedAt'])) ||
+                           (incoming().status == 'ARCHIVED' && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']))
+                         );
+
+        allow delete: if isOwner(userId) && isValidId(modelId);
+      }
+
+      match /dictations/{dictationId} {
+        allow get: if isOwner(userId) && isValidId(dictationId);
+        allow list: if isOwner(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(dictationId) &&
+                         incoming().keys().hasAll(['userId', 'modelId', 'modelName', 'language', 'rawTranscript', 'adaptedText', 'spokenAloud', 'latencyMs', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['userId', 'modelId', 'modelName', 'language', 'rawTranscript', 'adaptedText', 'spokenAloud', 'latencyMs', 'createdAt', 'updatedAt']) &&
+                         isValidDictationEntry(incoming(), userId);
+
+        allow update: if isOwner(userId) &&
+                         isValidId(dictationId) &&
+                         isValidDictationEntry(incoming(), userId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['adaptedText', 'spokenAloud', 'updatedAt']);
+
+        allow delete: if isOwner(userId) && isValidId(dictationId);
+      }
+    }
+  }
+}

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<resources>
+    <string name="firestore_database_id" translatable="false">ai-studio-android-voxbridg-c7245bf5-a743-46f9-8d4d-d1a6999546d2</string>
+    <string name="recaptcha_site_key" translatable="false">6LezNC0uAAAAALO9G9A19oDnPjCR48F88wTjMQqs</string>
+</resources>

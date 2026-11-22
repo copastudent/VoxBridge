@@ -1,0 +1,6 @@
+{
+  "name": "VoxBridge",
+  "description": "Personalized non-standard speech recording, voice profile training, and real-time dictation and speech synthesis assistant.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
